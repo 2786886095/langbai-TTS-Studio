@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -62,6 +63,11 @@ def test_cancelled_is_not_presented_as_failed(project_root: Path, commercial_rel
 @pytest.fixture(scope="session")
 def ui_metrics(project_root: Path, commercial_release: bool) -> dict:
     require_commercial_gate(commercial_release)
+    if os.environ.get("CI") and os.environ.get("LANGBAI_CI_UI_CAPTURE") != "1":
+        pytest.skip(
+            "GitHub-hosted Windows runners do not provide a reliable interactive desktop; "
+            "real Electron window evidence remains a required local prepackage gate"
+        )
     built = subprocess.run(
         ["npm.cmd", "run", "build:frontend"],
         cwd=project_root,
