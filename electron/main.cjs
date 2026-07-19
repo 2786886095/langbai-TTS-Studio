@@ -244,16 +244,11 @@ async function createWindow() {
       sandbox: true,
     },
   });
-  const initialZoom = Number(desktopState.zoomFactor);
-  if (Number.isFinite(initialZoom) && initialZoom >= 0.8 && initialZoom <= 1.5) {
-    mainWindow.webContents.setZoomFactor(initialZoom);
-  }
   if (desktopState.maximized) mainWindow.maximize();
   mainWindow.on('close', () => {
     if (!mainWindow) return;
     if (!mainWindow.isMaximized() && !mainWindow.isMinimized()) desktopState.bounds = mainWindow.getBounds();
     desktopState.maximized = mainWindow.isMaximized();
-    desktopState.zoomFactor = mainWindow.webContents.getZoomFactor();
     saveDesktopState();
   });
   mainWindow.webContents.on('before-input-event', (event, input) => {
@@ -271,14 +266,8 @@ async function createWindow() {
       sendToRenderer('app:command', command);
       return;
     }
-    if (['+', '=', '-'].includes(key)) {
+    if (['+', '=', '-', '0'].includes(key)) {
       event.preventDefault();
-      const delta = key === '-' ? -0.1 : 0.1;
-      const factor = Math.max(0.8, Math.min(1.5, mainWindow.webContents.getZoomFactor() + delta));
-      mainWindow.webContents.setZoomFactor(factor);
-      desktopState.zoomFactor = factor;
-      saveDesktopState();
-      sendToRenderer('app:zoom-changed', factor);
     }
   });
 
@@ -299,13 +288,24 @@ async function createWindow() {
           await mainWindow.webContents.executeJavaScript("document.querySelector('.existing-engine-callout, .runtime-license-list')?.scrollIntoView({ block: 'center' })");
         }
       } else if (captureView) {
-        const labels = { tasks: '任务队列', audio: '音频库', history: '历史记录', studio: '创作台' };
+        const labels = { tasks: '任务队列', voices: '角色声音', 'voice-editor': '角色声音', community: 'GPT 模型广场', audio: '音频库', history: '历史记录', studio: '创作台' };
         const label = labels[captureView];
         if (label) {
           await mainWindow.webContents.executeJavaScript(`Array.from(document.querySelectorAll('nav button')).find((button) => button.textContent.includes(${JSON.stringify(label)}))?.click()`);
         }
+        if (captureView === 'voice-editor') {
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          await mainWindow.webContents.executeJavaScript("Array.from(document.querySelectorAll('button')).find((button) => button.textContent.includes('新建角色声音'))?.click()");
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          await mainWindow.webContents.executeJavaScript(`(() => {
+            const select = document.querySelector('.voice-editor select');
+            if (!select) return;
+            select.value = 'gpt_sovits';
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+          })()`);
+        }
       }
-      await new Promise((resolve) => setTimeout(resolve, captureView === 'engine-manager' ? 5500 : 800));
+      await new Promise((resolve) => setTimeout(resolve, captureView === 'engine-manager' ? 5500 : captureView === 'community' ? 2200 : 800));
       const image = await mainWindow.webContents.capturePage();
       fs.writeFileSync(capturePath, image.toPNG());
       stopBackend();
@@ -347,8 +347,6 @@ ipcMain.handle('dialog:read-text-file', async () => {
   });
   if (result.canceled) return null;
   const selected = result.filePaths[0];
-  const stat = fs.statSync(selected);
-  if (stat.size > 10 * 1024 * 1024) throw new Error('文本文件不能超过 10 MB');
   return { path: selected, name: path.basename(selected), content: fs.readFileSync(selected, 'utf8') };
 });
 
@@ -383,14 +381,6 @@ ipcMain.handle('dialog:export-audio', async (_event, targetPath) => {
   return { path: destination, name: path.basename(destination) };
 });
 
-ipcMain.handle('app:set-zoom-factor', (_event, rawFactor) => {
-  const factor = Math.max(0.8, Math.min(1.5, Number(rawFactor) || 1));
-  mainWindow?.webContents.setZoomFactor(factor);
-  desktopState.zoomFactor = factor;
-  saveDesktopState();
-  return factor;
-});
-
 ipcMain.handle('updates:check', async (_event, requestedChannel = 'stable') => {
   if (!app.isPackaged) return { supported: false, reason: '开发模式不检查更新' };
   const wantsBeta = requestedChannel === 'beta';
@@ -408,7 +398,6 @@ ipcMain.handle('app:runtime-info', () => ({
   platform: process.platform,
   version: app.getVersion(),
   packaged: app.isPackaged,
-  zoomFactor: mainWindow?.webContents.getZoomFactor() || 1,
   desktopLogPath: desktopLogPath(),
 }));
 

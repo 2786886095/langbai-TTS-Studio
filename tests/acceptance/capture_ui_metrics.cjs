@@ -14,6 +14,15 @@ const DEFAULT_VIEWPORT = { width: 1920, height: 1080 };
 const MINIMUM_VIEWPORT = { width: 1180, height: 720 };
 
 app.commandLine.appendSwitch("force-device-scale-factor", "1");
+if (process.env.CI) {
+  app.commandLine.appendSwitch("disable-gpu");
+  app.commandLine.appendSwitch("no-sandbox");
+}
+
+const watchdog = setTimeout(() => {
+  process.stderr.write("UI acceptance capture exceeded its 105 second watchdog.\n");
+  app.exit(2);
+}, 105_000);
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -193,8 +202,10 @@ app.whenReady().then(async () => {
 
   fs.writeFileSync(path.join(outputRoot, "ui-metrics.json"), JSON.stringify(report, null, 2));
   window.destroy();
-  app.quit();
+  clearTimeout(watchdog);
+  app.exit(0);
 }).catch(error => {
+  clearTimeout(watchdog);
   process.stderr.write(String(error?.stack || error));
   app.exit(1);
 });

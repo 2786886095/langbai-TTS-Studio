@@ -65,7 +65,7 @@ class ProjectCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=2000)
     engine: str
-    text: str = Field(default="", max_length=2_000_000)
+    text: str = ""
     parameters: dict[str, Any] = Field(default_factory=dict, alias="params")
     long_audio: LongAudioOptions = Field(default_factory=LongAudioOptions, alias="longAudio")
 
@@ -83,7 +83,7 @@ class ProjectUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=2000)
     engine: str | None = None
-    text: str | None = Field(default=None, max_length=2_000_000)
+    text: str | None = None
     parameters: dict[str, Any] | None = Field(default=None, alias="params")
     long_audio: LongAudioOptions | None = Field(default=None, alias="longAudio")
 
@@ -108,7 +108,7 @@ class Project(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=2000)
     engine: str
-    text: str = Field(default="", max_length=2_000_000)
+    text: str = ""
     parameters: dict[str, Any] = Field(default_factory=dict, alias="params")
     long_audio: LongAudioOptions = Field(default_factory=LongAudioOptions, alias="longAudio")
     source_project_id: str | None = Field(default=None, alias="sourceProjectId")
