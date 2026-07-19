@@ -224,6 +224,31 @@ class SubprocessAdapter(EngineAdapter):
             "required_parameters": self.required_parameters,
         }
 
+    def runtime_snapshot(self, lines: int = 160) -> dict[str, Any]:
+        process = self._process
+        running = process is not None and process.poll() is None
+        log_path = self.log_dir / f"{self.engine_id}.log"
+        log_lines: list[str] = []
+        if log_path.is_file():
+            try:
+                with log_path.open("r", encoding="utf-8", errors="replace") as handle:
+                    log_lines = handle.readlines()[-max(20, min(lines, 500)):]
+            except OSError:
+                log_lines = []
+        return {
+            **self.status(),
+            "running": running,
+            "pid": process.pid if running and process else None,
+            "command": [str(self.python_path), "-u", str(self.backend_root / "engine_worker.py")],
+            "cwd": str(self.project_path),
+            "logPath": str(log_path),
+            "logLines": [line.rstrip("\r\n") for line in log_lines],
+        }
+
+    def start(self) -> None:
+        with self._lock:
+            self._start()
+
     def _start(self) -> None:
         if self._process is not None and self._process.poll() is None:
             return
@@ -397,6 +422,20 @@ class AutoDetectAdapter(EngineAdapter):
 
     def synthesize(self, text: str, output_path: Path, parameters: dict[str, Any]) -> None:
         return self._current().synthesize(text, output_path, parameters)
+
+    def runtime_snapshot(self, lines: int = 160) -> dict[str, Any]:
+        return self._current().runtime_snapshot(lines)
+
+    def start(self) -> None:
+        self._current().start()
+
+    def restart(self) -> None:
+        with self._lock:
+            if self._delegate is not None:
+                self._delegate.close()
+            self._delegate = None
+            self._signature = None
+        self._current().start()
 
     def close(self) -> None:
         with self._lock:

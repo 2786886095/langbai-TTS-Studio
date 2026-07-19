@@ -63,3 +63,45 @@ def test_unknown_engine_parameter_is_rejected(tmp_path):
         })
         assert response.status_code == 400
         assert "未知" in response.json()["detail"]
+
+
+def test_runtime_console_and_model_scan_contract(tmp_path):
+    adapters = {name: MockAdapter(name) for name in ("indextts2", "voxcpm", "gpt_sovits")}
+    app = create_app(adapters=adapters, data_dir=tmp_path / "data", mock_mode=True)
+    model_root = tmp_path / "downloaded-model"
+    model_root.mkdir()
+    (model_root / "demo-e10.ckpt").write_bytes(b"gpt")
+    (model_root / "demo-s20.pth").write_bytes(b"sovits")
+
+    with TestClient(app) as client:
+        runtime = client.get("/api/runtime/engines?lines=40")
+        assert runtime.status_code == 200
+        assert {item["id"] for item in runtime.json()["items"]} == set(adapters)
+        assert all("logLines" in item and "command" in item for item in runtime.json()["items"])
+
+        assert client.post("/api/runtime/engines/gpt_sovits/start").json()["ok"] is True
+        assert client.post("/api/runtime/engines/gpt_sovits/restart").json()["ok"] is True
+        assert client.post("/api/runtime/engines/gpt_sovits/stop").json()["ok"] is True
+        assert client.post("/api/runtime/engines/unknown/start").status_code == 404
+
+        scan = client.post("/api/community-models/scan", json={"paths": [str(model_root)]})
+        assert scan.status_code == 200
+        assert len(scan.json()["items"]) == 1
+        assert scan.json()["items"][0]["gptWeightsPath"].endswith(".ckpt")
+
+        activity = client.get("/api/runtime/activity")
+        assert activity.status_code == 200
+        assert activity.json()["active"] is False
+
+        capabilities = client.get("/api/training/capabilities")
+        assert capabilities.status_code == 200
+        assert {"voxcpm", "gptSovits"}.issubset(capabilities.json())
+        workbench = client.post("/api/training/gpt-sovits/workbench/start")
+        assert workbench.status_code == 200
+        assert workbench.json()["running"] is True
+        assert client.get("/api/runtime/activity").json()["active"] is True
+        assert client.post("/api/training/gpt-sovits/workbench/stop").json()["running"] is False
+
+        terminated = client.post("/api/runtime/terminate-active")
+        assert terminated.status_code == 200
+        assert terminated.json()["ok"] is True
