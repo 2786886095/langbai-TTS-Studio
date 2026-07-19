@@ -206,6 +206,8 @@ class JobManager:
         job.updated_at = now_iso()
         self.store.save(job)
         self._emit(job, "job.started")
+        completed_count = sum(segment.status == SegmentStatus.completed for segment in job.segments)
+        total_segments = len(job.segments)
         for segment in job.segments:
             if segment.status == SegmentStatus.completed and segment.output_path and Path(segment.output_path).is_file():
                 continue
@@ -245,12 +247,13 @@ class JobManager:
             if not success:
                 job.status = JobStatus.failed
                 job.error = f"第 {segment.index + 1} 段失败：{last_error}"
-                job.progress = sum(s.status == SegmentStatus.completed for s in job.segments) / len(job.segments)
+                job.progress = completed_count / total_segments
                 job.updated_at = now_iso()
                 self.store.save(job)
                 self._emit(job, "job.failed")
                 return
-            job.progress = sum(s.status == SegmentStatus.completed for s in job.segments) / len(job.segments)
+            completed_count += 1
+            job.progress = completed_count / total_segments
             job.updated_at = now_iso()
             self.store.save(job)
             self._emit(job, "segment.completed")

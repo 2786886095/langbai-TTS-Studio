@@ -1,6 +1,6 @@
 {
   "name": "langbai-tts-studio",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "license": "MIT",
   "author": "langbai-TTS-Studio contributors",
@@ -58,11 +58,11 @@
       "target": [
         "nsis"
       ],
-      "artifactName": "${productName}-${version}-${arch}.${ext}"
+      "artifactName": "${productName}-Setup-${version}-${arch}.${ext}"
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": false
     },
     "publish": [{
       "provider": "github",

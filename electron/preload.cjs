@@ -9,7 +9,6 @@ contextBridge.exposeInMainWorld('langbaiDesktop', {
   openExternal: (targetUrl) => ipcRenderer.invoke('shell:open-external', targetUrl),
   getAudioUrl: (targetPath) => ipcRenderer.invoke('media:grant-audio', targetPath),
   exportAudio: (targetPath) => ipcRenderer.invoke('dialog:export-audio', targetPath),
-  setZoomFactor: (factor) => ipcRenderer.invoke('app:set-zoom-factor', factor),
   checkForUpdates: (channel) => ipcRenderer.invoke('updates:check', channel),
   downloadUpdate: () => ipcRenderer.invoke('updates:download'),
   installUpdate: () => ipcRenderer.invoke('updates:install'),

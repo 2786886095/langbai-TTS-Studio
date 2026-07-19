@@ -6,6 +6,19 @@ from app.adapters.mock import MockAdapter
 from app.main import create_app
 
 
+def test_local_dev_origin_preflight_is_allowed(tmp_path):
+    adapters = {name: MockAdapter(name) for name in ("indextts2", "voxcpm", "gpt_sovits")}
+    app = create_app(adapters=adapters, data_dir=tmp_path, mock_mode=True)
+    with TestClient(app) as client:
+        response = client.options("/api/jobs", headers={
+            "Origin": "http://127.0.0.1:5173",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        })
+        assert response.status_code == 200
+        assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:5173"
+
+
 def test_engine_metadata_and_job_contract(tmp_path):
     adapters = {name: MockAdapter(name) for name in ("indextts2", "voxcpm", "gpt_sovits")}
     app = create_app(adapters=adapters, data_dir=tmp_path, mock_mode=True)

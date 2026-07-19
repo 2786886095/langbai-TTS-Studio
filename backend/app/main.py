@@ -14,6 +14,11 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 
 from .adapters import MockAdapter, build_default_adapters
 from .bindings import EngineBindingRequest, EngineBindingStore, EngineDiscoveryRequest
+from .community_models import (
+    CommunityCatalogError,
+    CommunityInstallRequest,
+    CommunityModelManager,
+)
 from .jobs import JobManager
 from .installer import InstallerManager, InstallRequest, ModelInstallRequest, ToolRepairRequest
 from .installer.manager import InstallConflictError
@@ -22,6 +27,12 @@ from .library import output_state, search_jobs
 from .models import JobCreate
 from .parameters import ENGINE_INFO, ENGINE_PARAMETERS, engine_catalog
 from .storage import JobStore
+from .voices import (
+    VOICE_PROFILE_SCHEMA_VERSION,
+    VoiceProfileCreate,
+    VoiceProfileStore,
+    VoiceProfileUpdate,
+)
 from .workspace import (
     PROJECT_SCHEMA_VERSION,
     SETTINGS_SCHEMA_VERSION,
@@ -67,6 +78,8 @@ def create_app(*, adapters=None, data_dir: str | Path | None = None, mock_mode: 
         root, default_install_root=managed_install_root
     )
     projects = ProjectStore(root / "projects")
+    voices = VoiceProfileStore(root / "voice-profiles")
+    community_models = CommunityModelManager(root / "community-models")
     settings_store = SettingsStore(root / "settings.json")
     diagnostics = DiagnosticExporter(root / "diagnostics", root / "logs")
 
@@ -80,16 +93,19 @@ def create_app(*, adapters=None, data_dir: str | Path | None = None, mock_mode: 
             manager.close()
             installer.close()
 
-    api = FastAPI(title="langbai TTS Studio API", version="1.0.0", lifespan=lifespan)
+    api = FastAPI(title="langbai TTS Studio API", version="1.1.0", lifespan=lifespan)
     api.state.manager = manager
     api.state.installer = installer
     api.state.projects = projects
+    api.state.voices = voices
+    api.state.community_models = community_models
     api.state.settings = settings_store
     api.state.diagnostics = diagnostics
     api.state.bindings = bindings
     api.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost", "http://127.0.0.1", "null"],
+        allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -227,6 +243,99 @@ def create_app(*, adapters=None, data_dir: str | Path | None = None, mock_mode: 
             workspace_error(exc)
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
+    @api.get("/api/voice-profiles")
+    def list_voice_profiles(engine: str | None = None):
+        try:
+            items = voices.list(engine)
+            return {"items": [item.model_dump(mode="json", by_alias=True) for item in items], "total": len(items)}
+        except (ValueError, WorkspaceError) as exc:
+            workspace_error(exc)
+
+    @api.post("/api/voice-profiles", status_code=status.HTTP_201_CREATED)
+    def create_voice_profile(request: VoiceProfileCreate):
+        try:
+            return voices.create(request).model_dump(mode="json", by_alias=True)
+        except (ValueError, WorkspaceError) as exc:
+            workspace_error(exc)
+
+    @api.get("/api/voice-profiles/{profile_id}")
+    def get_voice_profile(profile_id: str):
+        try:
+            return voices.get(profile_id).model_dump(mode="json", by_alias=True)
+        except (ValueError, WorkspaceError) as exc:
+            workspace_error(exc)
+
+    @api.put("/api/voice-profiles/{profile_id}")
+    def update_voice_profile(profile_id: str, request: VoiceProfileUpdate):
+        try:
+            return voices.update(profile_id, request).model_dump(mode="json", by_alias=True)
+        except (ValueError, WorkspaceError) as exc:
+            workspace_error(exc)
+
+    @api.delete("/api/voice-profiles/{profile_id}", status_code=status.HTTP_204_NO_CONTENT)
+    def delete_voice_profile(profile_id: str):
+        try:
+            voices.delete(profile_id)
+        except (ValueError, WorkspaceError) as exc:
+            workspace_error(exc)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    def community_error(exc: Exception):
+        if isinstance(exc, CommunityCatalogError):
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        if isinstance(exc, ValueError):
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @api.get("/api/community-models/categories")
+    def community_model_categories():
+        try:
+            return {"items": community_models.categories()}
+        except (CommunityCatalogError, ValueError) as exc:
+            community_error(exc)
+
+    @api.get("/api/community-models/languages")
+    def community_model_languages(category: str = Query(min_length=1, max_length=100)):
+        try:
+            return {"items": community_models.languages(category)}
+        except (CommunityCatalogError, ValueError) as exc:
+            community_error(exc)
+
+    @api.get("/api/community-models")
+    def list_community_models(
+        category: str = Query(min_length=1, max_length=100),
+        language: str = Query(min_length=1, max_length=50),
+    ):
+        try:
+            items = community_models.models(category, language)
+            return {"items": items, "total": len(items)}
+        except (CommunityCatalogError, ValueError) as exc:
+            community_error(exc)
+
+    @api.get("/api/community-models/installed")
+    def installed_community_models():
+        items = community_models.list_installed()
+        return {"items": items, "total": len(items)}
+
+    @api.post("/api/community-models/install", status_code=status.HTTP_202_ACCEPTED)
+    def install_community_model(request: CommunityInstallRequest):
+        try:
+            return community_models.install(request).model_dump(mode="json", by_alias=True)
+        except (CommunityCatalogError, ValueError) as exc:
+            community_error(exc)
+
+    @api.get("/api/community-models/jobs")
+    def community_model_jobs():
+        items = [item.model_dump(mode="json", by_alias=True) for item in community_models.list_jobs()]
+        return {"items": items, "total": len(items)}
+
+    @api.get("/api/community-models/jobs/{job_id}")
+    def community_model_job(job_id: str):
+        job = community_models.get_job(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="社区模型下载任务不存在")
+        return job.model_dump(mode="json", by_alias=True)
+
     @api.get("/api/settings")
     def get_settings():
         try:
@@ -245,6 +354,7 @@ def create_app(*, adapters=None, data_dir: str | Path | None = None, mock_mode: 
     def storage_schema():
         return {
             "projects": {"current": PROJECT_SCHEMA_VERSION, "readable": [0, PROJECT_SCHEMA_VERSION]},
+            "voiceProfiles": {"current": VOICE_PROFILE_SCHEMA_VERSION, "readable": [0, VOICE_PROFILE_SCHEMA_VERSION]},
             "settings": {"current": SETTINGS_SCHEMA_VERSION, "readable": [0, SETTINGS_SCHEMA_VERSION]},
             "migrationPolicy": "v0 records are migrated on read; future versions are rejected without overwrite",
         }

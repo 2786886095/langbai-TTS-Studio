@@ -1,15 +1,15 @@
 export type EngineId = "indextts2" | "voxcpm" | "gpt_sovits";
 export type FieldType = "range" | "number" | "text" | "select" | "toggle" | "file" | "textarea";
-export type Field = { key: string; label: string; type: FieldType; default: string | number | boolean; help: string; min?: number; max?: number; step?: number; options?: string[]; unit?: string };
+export type Field = { key: string; label: string; type: FieldType; default: string | number | boolean; help: string; min?: number; max?: number; step?: number; options?: string[]; unit?: string; fileKind?: "audio" | "gpt-weight" | "sovits-weight" | "directory" | "yaml" | "lora" };
 export type Group = { title: string; summary: string; fields: Field[] };
 
 export const engines: Record<EngineId, { name: string; description: string; accent: string }> = {
-  indextts2: { name: "IndexTTS 2", description: "音色与情感解耦，精细控制", accent: "#2563eb" },
-  voxcpm: { name: "VoxCPM 2", description: "音色设计与高保真克隆", accent: "#7c3aed" },
-  gpt_sovits: { name: "GPT-SoVITS", description: "少样本克隆与多语言推理", accent: "#059669" },
+  indextts2: { name: "IndexTTS 2", description: "参考音频克隆 · 情感解耦", accent: "#2563eb" },
+  voxcpm: { name: "VoxCPM 2", description: "参考音频克隆 · 音色设计", accent: "#7c3aed" },
+  gpt_sovits: { name: "GPT-SoVITS", description: "双权重模型 · 参考音频", accent: "#059669" },
 };
 
-const longAudio: Group = { title: "长音频与输出", summary: "拆分、断点续作、重试与合并", fields: [
+const longAudio: Group = { title: "长音频与输出", summary: "无软件时长上限、断点续作、重试与流式合并", fields: [
   { key: "split_mode", label: "智能分段方式", type: "select", default: "按标点与长度", options: ["按标点与长度", "仅按标点", "按段落", "不分段"], help: "决定长文本如何拆成稳定的小段，通常推荐按标点与长度。" },
   { key: "segment_chars", label: "每段最大字数", type: "number", default: 180, min: 40, max: 1000, step: 10, unit: "字", help: "越小越稳定；越大更连贯，但显存与失败风险更高。" },
   { key: "segment_pause", label: "段间停顿", type: "number", default: 280, min: 0, max: 3000, step: 20, unit: "ms", help: "合并时插入的静音，旁白通常使用 200–400ms。" },
@@ -47,6 +47,16 @@ export const parameterGroups: Record<EngineId, Group[]> = {
       { key: "interval_silence", label: "内部句间停顿", type: "number", default: 200, min: 0, max: 2000, step: 20, unit: "ms", help: "IndexTTS 内部分句间插入的静音。" },
       { key: "stream_return", label: "流式返回", type: "toggle", default: false, help: "逐块返回音频，首段更快可听。" },
       { key: "verbose", label: "详细推理日志", type: "toggle", default: false, help: "记录内部耗时与分段信息，用于排错。" },
+    ] },
+    { title: "运行环境与加速", summary: "模型目录、设备、精度与实验性加速", fields: [
+      { key: "model_dir", label: "模型目录", type: "file", fileKind: "directory", default: "", help: "覆盖绑定程序的默认模型目录；留空时使用本地项目配置。" },
+      { key: "device", label: "计算设备", type: "text", default: "cuda:0", help: "例如 cuda:0 或 cpu；多显卡时可指定设备编号。" },
+      { key: "use_fp16", label: "FP16 半精度", type: "toggle", default: true, help: "降低显存并加速；旧显卡或出现数值异常时关闭。" },
+      { key: "use_cuda_kernel", label: "CUDA 自定义内核", type: "toggle", default: true, help: "启用上游 CUDA 加速内核；本地环境不兼容时关闭。" },
+      { key: "use_accel", label: "通用加速路径", type: "toggle", default: false, help: "启用上游可选加速实现；不兼容时关闭以回退到标准推理。" },
+      { key: "use_torch_compile", label: "torch.compile", type: "toggle", default: false, help: "首次编译较慢，重复生成可能更快；显存紧张或报错时关闭。" },
+      { key: "use_deepspeed", label: "DeepSpeed", type: "toggle", default: false, help: "使用已安装的 DeepSpeed 推理优化；普通 Windows 环境通常保持关闭。" },
+      { key: "quick_streaming_tokens", label: "快速流式 Token", type: "number", default: 0, min: 0, max: 50, step: 1, help: "控制首段提前返回阈值；0 使用上游默认，过小可能影响衔接。" },
     ] }, longAudio,
   ],
   voxcpm: [
@@ -69,12 +79,32 @@ export const parameterGroups: Record<EngineId, Group[]> = {
       { key: "retry_badcase_ratio_threshold", label: "坏例比例阈值", type: "number", default: 6, min: 1, max: 15, step: 0.5, help: "音频/文本比超过此值判为异常，太低会误判。" },
       { key: "seed", label: "随机种子", type: "number", default: 42, min: -1, max: 2147483647, step: 1, help: "固定数值可复现；-1 表示随机。" },
       { key: "streaming", label: "流式生成", type: "toggle", default: false, help: "边生成边返回音频块，适合即时试听。" },
+    ] },
+    { title: "模型、降噪与 LoRA", summary: "本地模型路径、缓存、优化和 LoRA 微调", fields: [
+      { key: "model_path", label: "本地模型目录", type: "file", fileKind: "directory", default: "", help: "覆盖默认 VoxCPM2 模型目录；留空时使用绑定项目中的模型。" },
+      { key: "hf_model_id", label: "Hugging Face 模型 ID", type: "text", default: "openbmb/VoxCPM2", help: "从缓存或网络解析的模型仓库 ID；已有本地模型目录时由本地路径优先。" },
+      { key: "cache_dir", label: "模型缓存目录", type: "file", fileKind: "directory", default: "", help: "指定 Hugging Face 缓存位置，便于将大模型放到其他磁盘。" },
+      { key: "local_files_only", label: "仅使用本地文件", type: "toggle", default: true, help: "禁止推理时联网补下载；离线和可复现环境建议开启。" },
+      { key: "optimize", label: "启用模型优化", type: "toggle", default: true, help: "启用上游推理优化；出现兼容性问题时关闭。" },
+      { key: "enable_denoiser", label: "启用内置降噪器", type: "toggle", default: true, help: "加载参考音频降噪模型；会额外占用显存和启动时间。" },
+      { key: "zipenhancer_model_id", label: "降噪模型 ID", type: "text", default: "iic/speech_zipenhancer_ans_multiloss_16k_base", help: "覆盖 ZipEnhancer 降噪模型来源；仅启用内置降噪器时生效。" },
+      { key: "device", label: "计算设备", type: "text", default: "cuda:0", help: "例如 cuda:0 或 cpu；多显卡时可指定设备编号。" },
+      { key: "lora_weights_path", label: "LoRA 权重", type: "file", fileKind: "lora", default: "", help: "加载 VoxCPM2 LoRA 微调权重；留空时使用基础模型。" },
+      { key: "lora_r", label: "LoRA Rank", type: "number", default: 32, min: 1, max: 256, step: 1, help: "LoRA 低秩维度，必须与训练权重配置一致。" },
+      { key: "lora_alpha", label: "LoRA Alpha", type: "number", default: 16, min: 1, max: 512, step: 1, help: "LoRA 缩放系数，必须与训练权重配置一致。" },
+      { key: "lora_dropout", label: "LoRA Dropout", type: "range", default: 0, min: 0, max: 1, step: 0.01, help: "推理通常为 0；仅用于兼容特定训练配置。" },
+      { key: "lora_disable_lm", label: "LoRA 不作用于 LM", type: "toggle", default: false, help: "权重未训练语言模型层时开启，避免层结构不匹配。" },
+      { key: "lora_disable_dit", label: "LoRA 不作用于 DiT", type: "toggle", default: false, help: "权重未训练 DiT 层时开启。" },
+      { key: "lora_enable_proj", label: "LoRA 作用于投影层", type: "toggle", default: false, help: "只有训练时包含投影层 LoRA 才应开启。" },
     ] }, longAudio,
   ],
   gpt_sovits: [
-    { title: "参考与语言", summary: "参考音频、提示词与语言处理", fields: [
-      { key: "ref_audio_path", label: "主参考音频", type: "file", default: "", help: "必填。建议 3–10 秒、单人、清晰无混响。" },
-      { key: "aux_ref_audio_paths", label: "辅助参考音频", type: "file", default: "", help: "可加入多条参考融合音色与语气。" },
+    { title: "角色模型与参考", summary: "GPT/SoVITS 权重、参考音频与精确文本", fields: [
+      { key: "gpt_weights_path", label: "GPT 权重（.ckpt）", type: "file", fileKind: "gpt-weight", default: "", help: "必填。决定语义与韵律能力；必须与下方 SoVITS 权重属于同一角色模型。" },
+      { key: "sovits_weights_path", label: "SoVITS 权重（.pth）", type: "file", fileKind: "sovits-weight", default: "", help: "必填。决定声学音色；必须与 GPT 权重成对使用，不能混用其他角色。" },
+      { key: "version", label: "模型版本", type: "select", default: "auto", options: ["auto", "v2", "v3", "v4", "v2Pro", "v2ProPlus"], help: "auto 交由权重与 YAML 自动识别；只有确认训练版本时才手动指定。" },
+      { key: "ref_audio_path", label: "主参考音频", type: "file", fileKind: "audio", default: "", help: "必填。用于确定当前说话风格，建议 3–10 秒、单人、清晰无混响。" },
+      { key: "aux_ref_audio_paths", label: "辅助参考音频", type: "file", fileKind: "audio", default: "", help: "可加入一条辅助参考，融合音色与语气。" },
       { key: "prompt_text", label: "参考音频文本", type: "textarea", default: "", help: "精确转写；留空时相似度可能下降。" },
       { key: "prompt_lang", label: "参考文本语言", type: "select", default: "中文", options: ["中文", "英文", "日文", "韩文", "粤语", "中英混合", "日英混合", "多语种混合"], help: "必须与参考音频实际语言一致。" },
       { key: "text_lang", label: "目标文本语言", type: "select", default: "中文", options: ["中文", "英文", "日文", "韩文", "粤语", "中英混合", "日英混合", "多语种混合"], help: "决定前端预处理和发音模型选择。" },
@@ -98,6 +128,15 @@ export const parameterGroups: Record<EngineId, Group[]> = {
       { key: "overlap_length", label: "流式重叠长度", type: "number", default: 2, min: 0, max: 16, step: 1, help: "流式块之间重叠，减轻接缝。" },
       { key: "min_chunk_length", label: "最小流式块长度", type: "number", default: 16, min: 1, max: 128, step: 1, help: "越小首包越快，但调用更频繁。" },
       { key: "media_type", label: "API 媒体格式", type: "select", default: "wav", options: ["wav", "raw", "ogg", "aac"], help: "引擎直接返回格式；最终导出由输出设置决定。" },
+      { key: "return_fragment", label: "分片返回", type: "toggle", default: false, help: "使用上游旧版最佳质量分片返回；应用仍会汇总为完整段落。" },
+      { key: "fixed_length_chunk", label: "固定长度流式块", type: "toggle", default: false, help: "更快返回固定长度音频块，但上游注明可能降低质量。" },
+    ] },
+    { title: "运行配置与基础模型", summary: "YAML、设备、精度与前处理模型目录", fields: [
+      { key: "tts_config_path", label: "推理配置 YAML", type: "file", fileKind: "yaml", default: "", help: "覆盖项目默认推理配置，定义版本、设备与默认权重路径。" },
+      { key: "device", label: "计算设备覆盖", type: "text", default: "", help: "例如 cuda、cuda:0 或 cpu；留空时跟随 YAML。" },
+      { key: "is_half", label: "半精度覆盖", type: "select", default: "跟随配置", options: ["跟随配置", "开启", "关闭"], help: "跟随 YAML 最安全；显卡不支持 FP16 或出现异常时关闭。" },
+      { key: "bert_base_path", label: "BERT 模型目录", type: "file", fileKind: "directory", default: "", help: "中文文本前处理 BERT 路径；留空时使用项目配置。" },
+      { key: "cnhuhbert_base_path", label: "CNHuBERT 模型目录", type: "file", fileKind: "directory", default: "", help: "参考音频特征模型路径；留空时使用项目配置。" },
     ] }, longAudio,
   ],
 };
