@@ -1,0 +1,76 @@
+{
+  "name": "langbai-tts-studio",
+  "version": "1.0.0",
+  "private": true,
+  "license": "MIT",
+  "author": "langbai-TTS-Studio contributors",
+  "description": "Windows desktop studio for IndexTTS, VoxCPM and GPT-SoVITS",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/2786886095/langbai-TTS-Studio.git"
+  },
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "concurrently -k \"npm:dev:frontend\" \"npm:dev:electron\"",
+    "dev:frontend": "npm --prefix frontend run dev -- --host 127.0.0.1",
+    "dev:electron": "wait-on tcp:127.0.0.1:5173 && electron .",
+    "build:frontend": "npm --prefix frontend run build",
+    "build:backend": "backend\\.venv\\Scripts\\pyinstaller.exe --noconfirm --clean --onefile --name langbai-tts-backend --distpath backend-dist --workpath build\\pyinstaller --specpath build backend\\run.py",
+    "build": "npm run build:frontend && npm run build:backend && electron-builder --win",
+    "release": "npm run build:frontend && npm run build:backend && electron-builder --win --publish always",
+    "start": "electron .",
+    "test": "npm --prefix frontend run test --if-present"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "electron": "^37.2.6",
+    "electron-builder": "^26.0.12",
+    "wait-on": "^8.0.4"
+  },
+  "build": {
+    "appId": "studio.langbai.tts",
+    "productName": "langbai-TTS-Studio",
+    "asar": true,
+    "files": [
+      "electron/**/*",
+      "frontend/dist/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "backend",
+        "to": "backend",
+        "filter": [
+          "engine_worker.py"
+        ]
+      },
+      {
+        "from": "backend-dist/langbai-tts-backend.exe",
+        "to": "backend-runtime/langbai-tts-backend.exe"
+      },
+      {
+        "from": "assets/icon/langbai.ico",
+        "to": "icon.ico"
+      }
+    ],
+    "win": {
+      "icon": "assets/icon/langbai.ico",
+      "target": [
+        "nsis"
+      ],
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "publish": [{
+      "provider": "github",
+      "owner": "2786886095",
+      "repo": "langbai-TTS-Studio"
+    }]
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
+  }
+}

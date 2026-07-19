@@ -1,0 +1,29 @@
+name: Bug report
+description: 报告可复现的问题
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: 请先移除日志中的私人路径、令牌和参考音频内容。
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+    validations:
+      required: true
+  - type: dropdown
+    id: engine
+    attributes:
+      label: 引擎
+      options: [IndexTTS 2, VoxCPM 2, GPT-SoVITS, 安装器, 桌面界面, 其他]
+  - type: textarea
+    id: environment
+    attributes:
+      label: Windows、GPU 与版本信息

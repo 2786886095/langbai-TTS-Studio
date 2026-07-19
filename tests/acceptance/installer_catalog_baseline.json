@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "engines": {
+    "indextts2": {
+      "source_url": "https://codeload.github.com/index-tts/index-tts/zip/13495845e3028f0bb6ca1462ad22aa0e76349e40",
+      "source_commit": "13495845e3028f0bb6ca1462ad22aa0e76349e40",
+      "sha256": "7ed8bc742e2eeeb83f922247ef0e27f96327f418acacb6c63f182cafd66887ba",
+      "required_metadata": ["code_license", "code_license_url", "models"]
+    },
+    "voxcpm": {
+      "source_url": "https://codeload.github.com/OpenBMB/VoxCPM/zip/616d3d3e630a9c96c2853250eef91b0f39dcd5fa",
+      "source_commit": "616d3d3e630a9c96c2853250eef91b0f39dcd5fa",
+      "sha256": "131acb3c4741e63bcc33cfa5499f3ccaa3eb58bc00d352721a656a9ca12e448f",
+      "required_metadata": ["code_license", "code_license_url", "models"]
+    },
+    "gpt_sovits": {
+      "source_url": "https://codeload.github.com/RVC-Boss/GPT-SoVITS/zip/be6a4f1e9d8a22d41b7d42c22df9d7ef36f225d2",
+      "source_commit": "be6a4f1e9d8a22d41b7d42c22df9d7ef36f225d2",
+      "sha256": "d16ddb222ef573d122a7ce16816bfe9c7536dc51acaae59422f8835617e47026",
+      "required_metadata": ["code_license", "code_license_url", "models"]
+    }
+  },
+  "model_required_metadata": [
+    "id",
+    "name",
+    "provider",
+    "repo_id",
+    "revision",
+    "estimated_download_bytes",
+    "estimated_installed_bytes",
+    "license",
+    "license_url"
+  ]
+}
