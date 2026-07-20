@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle, BookOpen, CheckCircle2, ChevronDown, ChevronLeft, Circle, CircleStop,
   Cpu, FileJson2, FolderOpen, Gauge, GraduationCap, LoaderCircle, Play,
-  RefreshCw, RotateCw, Save, SlidersHorizontal, Sparkles,
+  PanelRightOpen, RefreshCw, RotateCw, Save, SlidersHorizontal, Sparkles, X,
 } from "lucide-react";
 
 type Capability = {
@@ -45,6 +45,7 @@ export function TrainingCenter({ apiUrl, onBack }: { apiUrl: (path: string) => s
   const [tasks, setTasks] = useState<TrainingTask[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [advanced, setAdvanced] = useState(false);
+  const [monitorOpen, setMonitorOpen] = useState(false);
   const [busy, setBusy] = useState("");
   const [message, setMessage] = useState("");
   const logRef = useRef<HTMLPreElement>(null);
@@ -79,6 +80,14 @@ export function TrainingCenter({ apiUrl, onBack }: { apiUrl: (path: string) => s
     return () => { disposed = true; if (timer) window.clearTimeout(timer); };
   }, []);
 
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMonitorOpen(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, []);
+
   const selected = useMemo(() => tasks.find(item => item.id === selectedId) ?? tasks[0], [tasks, selectedId]);
   const activeTask = tasks.find(item => ["queued", "running", "stopping"].includes(item.status));
   useEffect(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, [selected?.logLines]);
@@ -102,6 +111,7 @@ export function TrainingCenter({ apiUrl, onBack }: { apiUrl: (path: string) => s
       const payload = await response.json().catch(() => null) as TrainingTask & { detail?: string } | null;
       if (!response.ok) throw new Error(payload?.detail || `HTTP ${response.status}`);
       if (payload) setSelectedId(payload.id);
+      setMonitorOpen(true);
       setMessage("训练任务已启动，关闭页面不会停止训练。退出软件时会进行保护确认。");
       await load();
     } catch (error) { setMessage(error instanceof Error ? error.message : "训练启动失败"); }
@@ -121,7 +131,7 @@ export function TrainingCenter({ apiUrl, onBack }: { apiUrl: (path: string) => s
   };
 
   return <div className="library-page training-page">
-    <header className="library-topbar"><div><button className="back-link" onClick={onBack}><ChevronLeft size={14} />返回选择训练引擎</button><p className="eyebrow">本地模型训练</p><h1>VoxCPM2 训练中心</h1><p>从数据清单到 LoRA 或全量 SFT，训练进度、日志和检查点都保存在本地。</p></div><button className="secondary-button" onClick={() => void load()}><RefreshCw size={15} />刷新状态</button></header>
+    <header className="library-topbar"><div><button className="back-link" onClick={onBack}><ChevronLeft size={14} />返回选择训练引擎</button><p className="eyebrow">本地模型训练</p><h1>VoxCPM2 训练中心</h1><p>从数据清单到 LoRA 或全量 SFT，训练进度、日志和检查点都保存在本地。</p></div><div className="training-header-actions"><button className="secondary-button training-monitor-entry" aria-expanded={monitorOpen} onClick={() => setMonitorOpen(true)}><PanelRightOpen size={16} /><span><strong>进度与日志</strong><small>{activeTask ? `${statusLabel[activeTask.status]} · ${Math.round((activeTask.progress || 0) * 100)}%` : tasks.length ? `${tasks.length} 个历史任务` : "暂无任务"}</small></span></button><button className="secondary-button" onClick={() => void load()}><RefreshCw size={15} />刷新状态</button></div></header>
 
     {message && <div className={`manager-notice ${/(失败|不存在|无法|占用|缺少)/.test(message) ? "warning" : ""}`}><AlertTriangle size={16} /><span>{message}</span></div>}
 
@@ -162,11 +172,14 @@ export function TrainingCenter({ apiUrl, onBack }: { apiUrl: (path: string) => s
           {form.mode === "lora" && <><NumberField label="LoRA Rank" value={form.loraRank} min={1} step={8} onChange={value => patch("loraRank", value)} help="容量越大，参数与显存占用越高。" /><NumberField label="LoRA Alpha" value={form.loraAlpha} min={1} step={8} onChange={value => patch("loraAlpha", value)} help="LoRA 更新强度缩放。" /><NumberField label="LoRA Dropout" value={form.loraDropout} min={0} step={0.01} onChange={value => patch("loraDropout", value)} help="小数据集可适度增加以抑制过拟合。" /><div className="training-module-toggles"><strong>训练模块</strong><Toggle label="语言模型 LM" checked={form.enableLm} onChange={value => patch("enableLm", value)} /><Toggle label="声学 DiT" checked={form.enableDit} onChange={value => patch("enableDit", value)} /><Toggle label="投影层" checked={form.enableProj} onChange={value => patch("enableProj", value)} /></div></>}
         </div>}
 
-        <div className="training-launch-bar"><div><Gauge size={18} /><span><strong>{form.mode === "lora" ? "LoRA 微调" : "全量 SFT"}</strong><small>{form.maxSteps} 步 · 有效批大小 {form.batchSize * form.gradAccumSteps} · 本地保存</small></span></div><button className="primary-button" disabled={Boolean(activeTask) || busy === "start" || !form.trainManifest || !form.pretrainedPath || !form.outputDir} onClick={() => void startTraining()}>{busy === "start" ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}{activeTask ? "已有训练运行" : "开始训练"}</button></div>
+        <div className="training-launch-bar"><div><Gauge size={18} /><span><strong>{form.mode === "lora" ? "LoRA 微调" : "全量 SFT"}</strong><small>{form.maxSteps} 步 · 有效批大小 {form.batchSize * form.gradAccumSteps} · 本地保存</small></span></div><div className="training-launch-actions"><button className="secondary-button" onClick={() => setMonitorOpen(true)}><PanelRightOpen size={16} />查看进度与日志</button><button className="primary-button" disabled={Boolean(activeTask) || busy === "start" || !form.trainManifest || !form.pretrainedPath || !form.outputDir} onClick={() => void startTraining()}>{busy === "start" ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}{activeTask ? "已有训练运行" : "开始训练"}</button></div></div>
       </section>
+    </div>
 
-      <aside className="training-monitor-panel">
-        <div className="training-monitor-head"><div><p className="eyebrow">实时任务</p><h2>训练进度与日志</h2></div><GraduationCap size={23} /></div>
+    <div className={`training-monitor-layer ${monitorOpen ? "is-open" : ""}`} aria-hidden={!monitorOpen}>
+      <button className="training-monitor-scrim" aria-label="关闭训练进度与日志" onClick={() => setMonitorOpen(false)} />
+      <aside className="training-monitor-panel" role="dialog" aria-modal="true" aria-labelledby="training-monitor-title">
+        <div className="training-monitor-head"><div><p className="eyebrow">实时任务</p><h2 id="training-monitor-title">训练进度与日志</h2><span>选择任务查看完整输出，训练期间每 2 秒自动刷新。</span></div><button className="icon-button" aria-label="关闭训练进度与日志" onClick={() => setMonitorOpen(false)}><X size={19} /></button></div>
         <div className="training-task-list">{tasks.length ? tasks.map(task => <button key={task.id} className={selected?.id === task.id ? "active" : ""} onClick={() => setSelectedId(task.id)}><Circle className={`training-task-dot ${task.status}`} size={9} fill="currentColor" /><i><strong>{task.name}</strong><small>{task.mode === "lora" ? "LoRA" : "全量 SFT"} · {statusLabel[task.status]}</small></i><b>{Math.round((task.progress || 0) * 100)}%</b></button>) : <div className="training-empty"><GraduationCap size={26} /><strong>还没有训练任务</strong><span>配置数据和参数后，训练日志会显示在这里。</span></div>}</div>
         {selected && <div className="training-selected">
           <div className="training-progress-summary"><div><strong>{statusLabel[selected.status]}</strong><span>{selected.currentStep} / {selected.maxSteps} 步 · {selected.samples} 个样本{selected.pid ? ` · PID ${selected.pid}` : ""}</span></div><b>{Math.round((selected.progress || 0) * 100)}%</b><div><i style={{ width: `${Math.round((selected.progress || 0) * 100)}%` }} /></div></div>

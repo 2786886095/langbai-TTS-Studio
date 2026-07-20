@@ -80,7 +80,11 @@ def test_archive_rejects_path_traversal_even_for_ignored_files():
 
 def test_download_host_allowlist():
     _validate_download_url("https://pan.acgnai.top/model.zip")
+    _validate_download_url("https://cdn-lfs-cn-1.modelscope.cn/model.zip")
+    _validate_download_url("https://cdn-lfs-cn-12.modelscope.cn/model.zip")
     with pytest.raises(CommunityCatalogError, match="不受信任"):
         _validate_download_url("https://example.com/model.zip")
+    with pytest.raises(CommunityCatalogError, match="不受信任"):
+        _validate_download_url("https://cdn-lfs-cn-1.modelscope.cn.example.com/model.zip")
     with pytest.raises(CommunityCatalogError, match="不受信任"):
         _validate_download_url("http://pan.acgnai.top/model.zip")

@@ -13,3 +13,4 @@ When implementing from a selected generated mock, treat that image as the source
 - A bound local IndexTTS2 or VoxCPM2 installation must not show a generic downloadable-weight table as though the role voice came from that table.
 - Do not expose an application UI zoom preference or zoom keyboard shortcuts. The product uses responsive layout plus the existing comfortable/compact density choice.
 - Community GPT-SoVITS downloads must preserve source and license context and lead into role-profile creation, not automatically select a voice for generation.
+- VoxCPM2 training configuration uses the full workspace by default; task progress and logs open in a large right-side drawer instead of permanently consuming form width.

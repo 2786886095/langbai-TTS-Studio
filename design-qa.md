@@ -54,6 +54,56 @@ final result: passed
 
 ---
 
+# Design QA — VoxCPM2 全宽训练配置与进度抽屉
+
+## Evidence
+
+- User-provided problem screenshot: `D:\Downloads\SnowShot_2026-07-20_11-47-13.png`
+- Accepted implementation screenshots:
+  - `F:\AI\peyin\langbai-TTS-Studio-src\docs\audit\2026-07-20-fixes\training-vox-fullwidth-1544x921.png`
+  - `F:\AI\peyin\langbai-TTS-Studio-src\docs\audit\2026-07-20-fixes\training-vox-monitor-1544x921.png`
+- Same-viewport comparison inputs:
+  - `F:\AI\peyin\langbai-TTS-Studio-src\docs\audit\2026-07-20-fixes\comparison-old-vs-fullwidth.png`
+  - `F:\AI\peyin\langbai-TTS-Studio-src\docs\audit\2026-07-20-fixes\comparison-old-vs-monitor-drawer.png`
+- Viewport: 1544 × 921, 100% zoom, comfortable density, Windows desktop.
+
+## Flow and findings
+
+1. Enter VoxCPM2 training — healthy.
+   - The configuration panel now receives the complete content width instead of sharing it permanently with an empty monitor column.
+   - Labels, controls, path text and tuning descriptions are visibly larger while staying inside the existing pure-color design system.
+2. Configure LoRA or full SFT — healthy.
+   - Both strategy cards, five primary numeric settings and local path inputs remain visible without horizontal overflow.
+   - The start area now keeps the training summary, log entry point and primary action together.
+3. Open progress and logs — healthy.
+   - The header and launch bar both expose a clearly named `进度与日志` action.
+   - The 760px right-to-left drawer keeps task selection, progress, complete logs, checkpoint access and stop/resume actions in one focused surface.
+   - The drawer closes from the explicit close button, background scrim or Escape key.
+
+## Accessibility and evidence limits
+
+- Dialog semantics, `aria-modal`, labelled close controls and `aria-expanded` on the primary entry are present.
+- The empty state remains truthful and does not fabricate a training task or log output for the screenshot.
+- Screenshots confirm layout, hierarchy, clipping and contrast at the target viewport. They do not by themselves prove every keyboard focus order or screen-reader announcement; those remain runtime accessibility checks.
+
+## Technical checks
+
+- Electron development captures reached the real local backend and training capability/task APIs without renderer errors.
+- TypeScript `tsc --noEmit`: passed.
+- Electron main-process syntax: passed.
+- Focused community download tests: passed.
+- A live four-byte range request followed the current catalog redirect to `cdn-lfs-cn-1.modelscope.cn` and returned the ZIP signature `504b0304`.
+
+## Comparison conclusion
+
+- The reported cramped configuration is removed: the new default state dedicates the workspace to training setup.
+- Monitoring remains one click away and gains substantially more usable width than the old permanent side panel.
+- No actionable P0/P1/P2 visual findings remain in the accepted screenshots.
+
+final result: passed
+
+---
+
 # Design QA — 模型训练选择、训练指引与软件内工作台
 
 ## Evidence

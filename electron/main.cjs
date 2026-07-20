@@ -367,7 +367,7 @@ async function createWindow() {
           await mainWindow.webContents.executeJavaScript("document.querySelector('.existing-engine-callout, .runtime-license-list')?.scrollIntoView({ block: 'center' })");
         }
       } else if (captureView) {
-        const labels = { tasks: '任务队列', voices: '角色声音', 'voice-editor': '角色声音', community: 'GPT 模型广场', training: '模型训练', 'training-gpt': '模型训练', 'training-vox': '模型训练', runtime: '运行终端', audio: '音频库', history: '历史记录', studio: '创作台' };
+        const labels = { tasks: '任务队列', voices: '角色声音', 'voice-editor': '角色声音', community: 'GPT 模型广场', training: '模型训练', 'training-gpt': '模型训练', 'training-vox': '模型训练', 'training-vox-monitor': '模型训练', runtime: '运行终端', audio: '音频库', history: '历史记录', studio: '创作台' };
         const label = labels[captureView];
         if (label) {
           await mainWindow.webContents.executeJavaScript(`Array.from(document.querySelectorAll('nav button')).find((button) => button.textContent.includes(${JSON.stringify(label)}))?.click()`);
@@ -397,12 +397,16 @@ async function createWindow() {
           await new Promise((resolve) => setTimeout(resolve, 900));
           await mainWindow.webContents.executeJavaScript("Array.from(document.querySelectorAll('button')).find((button) => button.textContent.includes('进入 GPT-SoVITS 训练'))?.click()");
         }
-        if (captureView === 'training-vox') {
+        if (captureView === 'training-vox' || captureView === 'training-vox-monitor') {
           await new Promise((resolve) => setTimeout(resolve, 900));
           await mainWindow.webContents.executeJavaScript("Array.from(document.querySelectorAll('button')).find((button) => button.textContent.includes('进入 VoxCPM2 训练'))?.click()");
+          if (captureView === 'training-vox-monitor') {
+            await new Promise((resolve) => setTimeout(resolve, 650));
+            await mainWindow.webContents.executeJavaScript("document.querySelector('.training-monitor-entry')?.click()");
+          }
         }
       }
-      await new Promise((resolve) => setTimeout(resolve, captureView === 'engine-manager' ? 5500 : ['community', 'runtime', 'training', 'training-gpt', 'training-vox'].includes(captureView) ? 2200 : 800));
+      await new Promise((resolve) => setTimeout(resolve, captureView === 'engine-manager' ? 5500 : ['community', 'runtime', 'training', 'training-gpt', 'training-vox', 'training-vox-monitor'].includes(captureView) ? 2200 : 800));
       const image = await mainWindow.webContents.capturePage();
       fs.writeFileSync(capturePath, image.toPNG());
       stopBackend();

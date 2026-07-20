@@ -11,7 +11,7 @@ import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 from urllib.parse import urlencode, urlparse
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -23,6 +23,9 @@ CATALOG_ROOT = "https://rs.acgnai.top/api/model_libry"
 COMMUNITY_SOURCE_PAGE = "https://www.ai-hobbyist.com/forum.php?mod=forumdisplay&fid=138"
 HUGGING_FACE_API = "https://huggingface.co/api/models"
 ALLOWED_DOWNLOAD_HOSTS = {"pan.acgnai.top", "rs.acgnai.top"}
+ALLOWED_DOWNLOAD_HOST_PATTERNS = (
+    re.compile(r"^cdn-lfs-cn-\d+\.modelscope\.cn$", re.IGNORECASE),
+)
 ALLOWED_ARCHIVE_SUFFIXES = {
     ".ckpt", ".pth", ".wav", ".mp3", ".flac", ".ogg", ".m4a",
     ".txt", ".json", ".md", ".yaml", ".yml",
@@ -240,8 +243,18 @@ def _safe_name(value: str) -> str:
 
 def _validate_download_url(url: str) -> None:
     parsed = urlparse(url)
-    if parsed.scheme != "https" or parsed.hostname not in ALLOWED_DOWNLOAD_HOSTS:
+    hostname = (parsed.hostname or "").casefold()
+    trusted_host = hostname in ALLOWED_DOWNLOAD_HOSTS or any(pattern.fullmatch(hostname) for pattern in ALLOWED_DOWNLOAD_HOST_PATTERNS)
+    if parsed.scheme != "https" or not trusted_host:
         raise CommunityCatalogError("社区目录返回了不受信任的下载地址，已拒绝下载")
+
+
+class _TrustedDownloadRedirectHandler(HTTPRedirectHandler):
+    """Reject an untrusted redirect before urllib connects to the target."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        _validate_download_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def _safe_archive_members(archive: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
@@ -366,8 +379,9 @@ class CommunityModelManager:
                 raise CommunityCatalogError("该社区模型已经安装")
             cache.mkdir(parents=True, exist_ok=False)
             self._set(job.id, status="downloading", progress=0.01, message="正在下载社区模型")
-            request = Request(download_url, headers={"User-Agent": "langbai-TTS-Studio/1.1"})
-            with urlopen(request, timeout=60) as response, archive_path.open("wb") as output:
+            request = Request(download_url, headers={"User-Agent": "langbai-TTS-Studio/1.2"})
+            opener = build_opener(_TrustedDownloadRedirectHandler())
+            with opener.open(request, timeout=60) as response, archive_path.open("wb") as output:
                 final_url = response.geturl()
                 _validate_download_url(final_url)
                 total = int(response.headers.get("Content-Length") or 0)
