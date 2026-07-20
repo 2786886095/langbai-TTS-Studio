@@ -1,6 +1,6 @@
 {
   "name": "langbai-tts-studio",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "private": true,
   "license": "MIT",
   "author": "langbai-TTS-Studio contributors",
@@ -42,6 +42,7 @@
         "to": "backend",
         "filter": [
           "engine_worker.py",
+          "engine_runtime.py",
           "training_worker.py",
           "gpt_workbench_worker.py"
         ]

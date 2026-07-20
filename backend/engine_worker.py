@@ -8,6 +8,9 @@ import sys
 import traceback
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from engine_runtime import has_override, resolve_torch_device
+
 
 PROTOCOL_OUT = sys.stdout
 sys.stdout = sys.stderr  # third-party model logging must not corrupt JSON-RPC stdout
@@ -161,8 +164,11 @@ def gpt_sovits_synthesize(text: str, output: Path, p: dict) -> None:
     if _model is None or key != _model_key:
         config = TTS_Config(str(config_path))
         for name in ("device", "is_half", "t2s_weights_path", "vits_weights_path", "bert_base_path", "cnhuhbert_base_path"):
-            if p.get(name) is not None:
+            if has_override(p.get(name)):
                 setattr(config, name, p[name])
+        config.device = resolve_torch_device(config.device)
+        if config.device == "cpu":
+            config.is_half = False
         config.update_configs()
         _model = TTS(config)
         _model_key = key

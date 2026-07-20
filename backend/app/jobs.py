@@ -135,6 +135,7 @@ class JobManager:
         return self.store.load(job_id)
 
     def cancel(self, job_id: str) -> JobManifest:
+        adapter_to_cancel: EngineAdapter | None = None
         with self._lock:
             job = self._require(job_id)
             if job.status in (JobStatus.completed, JobStatus.cancelled):
@@ -146,7 +147,11 @@ class JobManager:
                 job.updated_at = now_iso()
                 self.store.save(job)
                 self._emit(job, "job.cancelled")
-            return job
+            elif job.status == JobStatus.running:
+                adapter_to_cancel = self.adapters.get(job.engine)
+        if adapter_to_cancel is not None:
+            adapter_to_cancel.cancel_current()
+        return self._require(job_id)
 
     def retry(self, job_id: str) -> JobManifest:
         with self._lock:
@@ -238,6 +243,8 @@ class JobManager:
                     success = True
                     break
                 except Exception as exc:
+                    if job.id in self._cancelled:
+                        return self._finish_cancelled(job)
                     last_error = f"{type(exc).__name__}: {exc}"
                     segment.status = SegmentStatus.failed
                     segment.error = last_error

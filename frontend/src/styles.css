@@ -54,6 +54,7 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .eyebrow { margin: 0 0 4px; color: var(--blue); font-size: 12px; line-height: 1; font-weight: 700; letter-spacing: 1.3px; text-transform: uppercase; }
 h1 { margin: 0; font-size: 20px; line-height: 1.2; letter-spacing: -.25px; }
 .top-actions { display: flex; align-items: center; gap: 8px; }
+.generation-cancel-button { min-height: 38px; padding: 8px 11px; display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
 .connection { display: flex; align-items: center; gap: 7px; padding: 8px 10px; color: #64748b; border: 1px solid var(--border); background: var(--surface); border-radius: 7px; font-size: 12px; }
 .connection.warn i { background: #f59e0b; }
 .primary-button, .secondary-button { border-radius: 7px; padding: 9px 13px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; border: 1px solid transparent; font-size: 13px; font-weight: 650; transition: background-color 180ms ease, border-color 180ms ease; }
@@ -208,6 +209,7 @@ h1 { margin: 0; font-size: 20px; line-height: 1.2; letter-spacing: -.25px; }
 .job-row { min-height: 54px; padding: 8px 12px; display: grid; grid-template-columns: 40px minmax(220px, 1fr) 110px 78px; align-items: center; gap: 9px; border-bottom: 1px solid #edf1f5; }
 .job-row:last-child { border-bottom: 0; }
 .job-play { width: 29px; height: 29px; display: grid; place-items: center; border-radius: 50%; border: 1px solid #9bb9de; color: var(--blue); background: #f4f8ff; }
+.job-play.running, .job-play.queued { color: #b91c1c; border-color: #f0aaaa; background: #fff5f5; }
 .job-play.done { color: var(--green); border-color: #9edbc7; background: #effcf7; }
 .job-play.failed { color: var(--danger); border-color: #f3b0b0; background: #fff5f5; }
 .job-main { min-width: 0; }
