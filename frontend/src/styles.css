@@ -96,7 +96,7 @@ h1 { margin: 0; font-size: 20px; line-height: 1.2; letter-spacing: -.25px; }
 .editor-actions > button:hover, .editor-footer button:hover { background: #f1f5f9; color: #0f172a; }
 .editor-actions .parameter-entry { min-height: 36px; padding-inline: 11px !important; color: #1d4ed8 !important; background: #edf4ff !important; border: 1px solid #c9dcff !important; font-weight: 700; }
 .editor-actions .parameter-entry:hover { background: #dfeaff !important; border-color: #9cbcff !important; }
-.parameter-entry span { min-width: 22px; height: 20px; display: grid; place-items: center; color: #fff; background: var(--blue); border-radius: 10px; font-size: 11px; }
+.parameter-entry span { min-width: 22px; height: 20px; display: grid; place-items: center; color: #fff; background: var(--blue); border-radius: 10px; font-size: 12px; }
 .document-title { flex: 0 0 46px; display: flex; align-items: center; gap: 9px; padding: 0 16px; }
 .document-title input { flex: 1; min-width: 0; font-size: 15px; font-weight: 650; color: #0f172a; border: 0; background: transparent; }
 .document-title input:focus { outline: 0; }
