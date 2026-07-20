@@ -16,7 +16,7 @@
     "dev:electron": "wait-on tcp:127.0.0.1:5173 && electron .",
     "build:frontend": "npm --prefix frontend run build",
     "build:backend": "backend\\.venv\\Scripts\\pyinstaller.exe --noconfirm --clean --onefile --name langbai-tts-backend --distpath backend-dist --workpath build\\pyinstaller --specpath build backend\\run.py",
-    "build": "npm run build:frontend && npm run build:backend && electron-builder --win",
+    "build": "npm run build:frontend && npm run build:backend && electron-builder --win --publish never",
     "release": "npm run build:frontend && npm run build:backend && electron-builder --win --publish always",
     "start": "electron .",
     "test": "npm --prefix frontend run test --if-present"
