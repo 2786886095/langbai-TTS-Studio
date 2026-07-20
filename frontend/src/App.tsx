@@ -16,7 +16,7 @@ import { CommunityModels } from "./CommunityModels";
 import { RuntimeConsole } from "./RuntimeConsole";
 import { TrainingHub } from "./TrainingHub";
 
-type Job = { id: string; title: string; engine: EngineId; progress: number; status: "running" | "queued" | "failed" | "cancelled" | "done"; segments: string; duration?: string };
+type Job = { id: string; title: string; engine: EngineId; progress: number; status: "running" | "queued" | "failed" | "cancelled" | "done"; segments: string; duration?: string; outputPath?: string };
 type ApiEngineStatus = { id?: string; name?: string; state?: string; available?: boolean };
 type AppSettings = { defaultEngine?: string; autoRevealOutput?: boolean; updateChannel?: "stable" | "beta" };
 type UpdateEvent = { state: "checking" | "available" | "current" | "downloading" | "downloaded" | "error"; info?: { version?: string }; progress?: { percent?: number; bytesPerSecond?: number }; message?: string };
@@ -63,10 +63,12 @@ function AppLogo() { return <div className="app-logo"><img src="./icon.png" alt=
 function normalizeJob(raw: Record<string, unknown>): Job {
   const engine = (["indextts2", "voxcpm", "gpt_sovits"].includes(String(raw.engine)) ? raw.engine : "indextts2") as EngineId;
   const statusValue = String(raw.status ?? "queued");
+  const output = raw.output && typeof raw.output === "object" ? raw.output as Record<string, unknown> : {};
   return {
     id: String(raw.id ?? crypto.randomUUID()), title: String(raw.title ?? "未命名任务"), engine,
     progress: Math.round(Number(raw.progress ?? 0) * 100), status: statusValue === "completed" ? "done" : (["running", "queued", "failed", "cancelled", "done"].includes(statusValue) ? statusValue : "queued") as Job["status"],
     segments: Array.isArray(raw.segments) ? `${raw.segments.filter(segment => typeof segment === "object" && segment && (segment as { status?: string }).status === "completed").length} / ${raw.segments.length} 段` : String(raw.segment_progress ?? "等待中"), duration: raw.duration ? String(raw.duration) : undefined,
+    outputPath: output.path ? String(output.path) : raw.outputPath ? String(raw.outputPath) : raw.output_path ? String(raw.output_path) : undefined,
   };
 }
 function statusValueLabel(status: Job["status"]) { return status === "running" ? "生成中" : status === "queued" ? "排队" : status === "done" ? "已完成" : status === "cancelled" ? "已取消" : "失败"; }
@@ -174,6 +176,7 @@ export function App() {
   const [projectLibraryOpen, setProjectLibraryOpen] = useState(false);
   const [confirmNewProject, setConfirmNewProject] = useState(false);
   const [cancelTarget, setCancelTarget] = useState<Job | null>(null);
+  const [previewAudio, setPreviewAudio] = useState<{ url: string; title: string } | null>(null);
   const [savingProject, setSavingProject] = useState(false);
   const [voiceProfiles, setVoiceProfiles] = useState<VoiceProfile[]>([]);
   const [selectedVoiceId, setSelectedVoiceId] = useState<Record<EngineId, string>>({ indextts2: "", voxcpm: "", gpt_sovits: "" });
@@ -221,17 +224,37 @@ export function App() {
     setActiveNav("voices");
   };
 
-  const revealCompletedOutput = async (jobId: string) => {
-    if (!window.langbaiDesktop?.showItemInFolder) return;
+  const resolveJobOutput = async (jobId: string, fallbackPath?: string) => {
+    const response = await fetch(apiUrl(`/api/jobs/${jobId}/output`));
+    if (!response.ok) throw new Error(`无法读取输出文件（HTTP ${response.status}）`);
+    const payload = await response.json() as { output?: { path?: string }; openContract?: { open?: { path?: string }; reveal?: { path?: string } } };
+    return {
+      openPath: payload.openContract?.open?.path ?? payload.output?.path ?? fallbackPath,
+      revealPath: payload.openContract?.reveal?.path ?? payload.output?.path ?? fallbackPath,
+    };
+  };
+
+  const revealCompletedOutput = async (jobId: string, fallbackPath?: string) => {
     try {
-      const response = await fetch(apiUrl(`/api/jobs/${jobId}/output`));
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const payload = await response.json() as { output?: { path?: string }; openContract?: { reveal?: { path?: string } } };
-      const targetPath = payload.openContract?.reveal?.path ?? payload.output?.path;
-      if (!targetPath) throw new Error("输出文件路径为空");
-      await window.langbaiDesktop.showItemInFolder(targetPath);
+      const output = await resolveJobOutput(jobId, fallbackPath);
+      if (!output.revealPath) throw new Error("输出文件路径为空");
+      if (!window.langbaiDesktop?.showItemInFolder) throw new Error("当前桌面端不支持打开文件位置");
+      await window.langbaiDesktop.showItemInFolder(output.revealPath);
     } catch (reason) {
       setNotice(`音频已完成，但无法定位输出文件：${reason instanceof Error ? reason.message : "未知错误"}`);
+    }
+  };
+
+  const playCompletedOutput = async (job: Job) => {
+    try {
+      const output = await resolveJobOutput(job.id, job.outputPath);
+      if (!output.openPath) throw new Error("输出文件路径为空");
+      if (!window.langbaiDesktop?.getAudioUrl) throw new Error("当前桌面端不支持本地音频试听");
+      const url = await window.langbaiDesktop.getAudioUrl(output.openPath);
+      if (!url) throw new Error("桌面端未返回可播放地址");
+      setPreviewAudio({ url, title: job.title });
+    } catch (reason) {
+      setNotice(`无法试听生成音频：${reason instanceof Error ? reason.message : "未知错误"}`);
     }
   };
 
@@ -501,7 +524,16 @@ export function App() {
 
       <div className={`parameter-drawer-layer ${parameterDrawerOpen ? "is-open" : ""}`} aria-hidden={!parameterDrawerOpen}><button className="parameter-scrim" aria-label="关闭推理参数" onClick={() => setParameterDrawerOpen(false)} /><aside className="parameter-panel parameter-drawer" role="dialog" aria-modal="true" aria-labelledby="parameter-drawer-title"><div className="parameter-drawer-head"><div><p className="eyebrow">{engines[engine].name}</p><h2 id="parameter-drawer-title">推理参数</h2><span>{parameterGroups[engine].reduce((total, group) => total + group.fields.length, 0)} 项设置 · 修改立即保存到当前方案</span></div><button className="icon-button" aria-label="关闭推理参数" onClick={() => setParameterDrawerOpen(false)}><X size={18} /></button></div><div className="parameter-drawer-tools"><label className="parameter-search"><Search size={15} /><input value={search} onChange={e => setSearch(e.target.value)} placeholder="搜索参数名称或用途" />{search && <button onClick={() => setSearch("")}><X size={14} /></button>}</label><div className="parameter-jump-list">{parameterGroups[engine].map((group, index) => <button key={group.title} onClick={() => { setGroupsOpen(prev => ({ ...prev, [group.title]: true })); document.getElementById(`parameter-group-${index}`)?.scrollIntoView({ block: "start", behavior: "smooth" }); }}>{group.title}<span>{group.fields.length}</span></button>)}</div></div><div className="parameter-scroll">{visibleGroups.map(group => { const index = parameterGroups[engine].findIndex(item => item.title === group.title); return <section className="parameter-group" id={`parameter-group-${index}`} key={group.title}><button className="group-trigger" onClick={() => setGroupsOpen(prev => ({ ...prev, [group.title]: !prev[group.title] }))}><div><strong>{group.title}</strong><span>{group.fields.length} 项 · {group.summary}</span></div>{groupsOpen[group.title] || search ? <ChevronDown size={17} /> : <ChevronRight size={17} />}</button>{(groupsOpen[group.title] || search) && <div className="group-fields">{group.fields.map(field => <FieldControl key={field.key} field={field} value={currentParams[field.key]} onChange={value => setParams(prev => ({ ...prev, [engine]: { ...prev[engine], [field.key]: value } }))} />)}</div>}</section>; })}</div><div className="parameter-footer drawer-footer"><div><Info size={14} /><span>每项均附中文用途与调试说明</span></div><span><button className="secondary-button" onClick={() => setParams(prev => ({ ...prev, [engine]: defaultsFor(engine) }))}><RotateCcw size={15} />恢复默认</button><button className="secondary-button" onClick={() => setParameterDrawerOpen(false)}>完成设置</button><button className="primary-button" onClick={submit} disabled={generating}><Zap size={16} />生成音频</button></span></div></aside></div>
 
-      <section className={`queue-drawer ${queueOpen ? "is-open" : ""}`}><button className="queue-handle" onClick={() => setQueueOpen(v => !v)}><div><ListMusic size={17} /><strong>生成队列</strong><span>{jobs.filter(j => j.status !== "done").length} 个未完成</span></div>{queueOpen ? <ChevronDown size={17} /> : <ChevronRight size={17} />}</button>{queueOpen && <div className="job-list">{jobs.length === 0 ? <div className="empty-queue"><ListMusic size={24} /><div><strong>队列还是空的</strong><span>配置参数并生成后，真实任务会出现在这里。</span></div></div> : jobs.map(job => <div className="job-row" key={job.id}><button className={`job-play ${job.status}`} disabled={job.status === "done"} onClick={() => ["failed", "cancelled"].includes(job.status) ? retryJob(job.id) : ["running", "queued"].includes(job.status) ? setCancelTarget(job) : undefined} title={["running", "queued"].includes(job.status) ? "取消任务" : ["failed", "cancelled"].includes(job.status) ? "重试任务" : statusValueLabel(job.status)}>{["running", "queued"].includes(job.status) ? <Square size={13} fill="currentColor" /> : job.status === "done" ? <Play size={15} /> : ["failed", "cancelled"].includes(job.status) ? <RefreshCw size={15} /> : <Clock3 size={15} />}</button><div className="job-main"><div className="job-title"><strong>{job.title}</strong><span>{engines[job.engine].name}</span></div><div className="progress-line"><div className="progress-track"><i style={{ width: `${job.progress}%` }} /></div><span>{job.status === "done" ? job.duration : `${job.progress}%`}</span></div></div><div className="job-segments">{job.status === "running" && <Activity size={14} />}{job.segments}</div><div className={`job-status ${job.status}`}>{statusValueLabel(job.status)}</div></div>)}</div>}</section>
+      {previewAudio && <section className="studio-audio-player" aria-label="生成音频试听"><div><span className="studio-player-icon"><AudioLines size={18} /></span><span><strong>正在试听</strong><small>{previewAudio.title}</small></span></div><audio src={previewAudio.url} controls autoPlay /><button className="icon-button" onClick={() => setPreviewAudio(null)} aria-label="关闭试听"><X size={17} /></button></section>}
+      <section className={`queue-drawer ${queueOpen ? "is-open" : ""}`}>
+        <button className="queue-handle" onClick={() => setQueueOpen(v => !v)}><div><ListMusic size={17} /><strong>生成队列</strong><span>{jobs.filter(j => j.status !== "done").length} 个未完成</span></div>{queueOpen ? <ChevronDown size={17} /> : <ChevronRight size={17} />}</button>
+        {queueOpen && <div className="job-list">{jobs.length === 0 ? <div className="empty-queue"><ListMusic size={24} /><div><strong>队列还是空的</strong><span>配置参数并生成后，真实任务会出现在这里。</span></div></div> : jobs.map(job => <div className="job-row" key={job.id}>
+          <button className={`job-play ${job.status}`} onClick={() => job.status === "done" ? void playCompletedOutput(job) : ["failed", "cancelled"].includes(job.status) ? void retryJob(job.id) : ["running", "queued"].includes(job.status) ? setCancelTarget(job) : undefined} title={job.status === "done" ? "试听音频" : ["running", "queued"].includes(job.status) ? "取消任务" : ["failed", "cancelled"].includes(job.status) ? "重试任务" : statusValueLabel(job.status)}>{["running", "queued"].includes(job.status) ? <Square size={13} fill="currentColor" /> : job.status === "done" ? <Play size={15} fill="currentColor" /> : ["failed", "cancelled"].includes(job.status) ? <RefreshCw size={15} /> : <Clock3 size={15} />}</button>
+          <div className="job-main"><div className="job-title"><strong>{job.title}</strong><span>{engines[job.engine].name}</span></div><div className="progress-line"><div className="progress-track"><i style={{ width: `${job.progress}%` }} /></div><span>{job.status === "done" ? job.duration : `${job.progress}%`}</span></div></div>
+          <div className="job-segments">{job.status === "running" && <Activity size={14} />}{job.segments}</div>
+          {job.status === "done" ? <div className="job-result-actions"><button onClick={() => void playCompletedOutput(job)}><Play size={14} fill="currentColor" />试听</button><button onClick={() => void revealCompletedOutput(job.id, job.outputPath)}><FolderOpen size={14} />打开位置</button></div> : <div className={`job-status ${job.status}`}>{statusValueLabel(job.status)}</div>}
+        </div>)}</div>}
+      </section>
       </>}
     </main>
     {updateEvent && !updateDismissed && ["available", "downloading", "downloaded", "error"].includes(updateEvent.state) && <aside className={`global-update-notice ${updateEvent.state}`} role="status" aria-live="polite"><span className="global-update-icon">{updateEvent.state === "downloading" ? <Download size={21} /> : <BellRing size={21} />}</span><div><p className="eyebrow">软件更新</p><strong>{updateEvent.state === "available" ? `发现新版本 ${updateEvent.info?.version ?? ""}` : updateEvent.state === "downloading" ? `正在下载 ${Math.round(updateEvent.progress?.percent ?? 0)}%` : updateEvent.state === "downloaded" ? `新版本 ${updateEvent.info?.version ?? ""} 已准备好` : "更新检查遇到问题"}</strong><small>{updateEvent.state === "available" ? "可直接在软件内下载，当前任务不会被中断。" : updateEvent.state === "downloading" ? "下载完成后会提示重启安装。" : updateEvent.state === "downloaded" ? "重启软件即可完成更新。" : updateEvent.message || "可稍后在设置中重新检查。"}</small>{updateEvent.state === "downloading" && <div className="global-update-progress"><i style={{ width: `${Math.round(updateEvent.progress?.percent ?? 0)}%` }} /></div>}</div><div className="global-update-actions">{updateEvent.state === "available" && <button className="primary-button" onClick={() => void downloadAvailableUpdate()}>立即下载</button>}{updateEvent.state === "downloaded" && <button className="primary-button" onClick={installAvailableUpdate}>重启安装</button>}{updateEvent.state !== "downloading" && <button className="icon-button" aria-label="稍后提醒" onClick={() => setUpdateDismissed(true)}><X size={16} /></button>}</div></aside>}

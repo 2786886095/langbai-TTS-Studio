@@ -43,6 +43,14 @@ def test_audio_library_has_real_playback(project_root: Path, commercial_release:
     assert "getAudioUrl" in source, "播放器必须通过受控的 Electron 本地音频 URL 读取输出"
 
 
+def test_completed_job_has_playback_and_reveal_actions(project_root: Path, commercial_release: bool) -> None:
+    require_commercial_gate(commercial_release)
+    source = (project_root / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")
+    assert "playCompletedOutput" in source and "getAudioUrl" in source, "生成完成后必须能在创作台直接试听"
+    assert "试听" in source, "完成任务必须提供明确的试听操作"
+    assert "打开位置" in source and "showItemInFolder" in source, "完成任务必须能在资源管理器中定位输出文件"
+
+
 def test_settings_and_diagnostics_are_reachable_from_ui(project_root: Path, commercial_release: bool) -> None:
     require_commercial_gate(commercial_release)
     frontend = "\n".join(

@@ -107,7 +107,7 @@ def create_app(*, adapters=None, data_dir: str | Path | None = None, mock_mode: 
             manager.close()
             installer.close()
 
-    api = FastAPI(title="langbai TTS Studio API", version="1.2.3", lifespan=lifespan)
+    api = FastAPI(title="langbai TTS Studio API", version="1.2.4", lifespan=lifespan)
     api.state.manager = manager
     api.state.installer = installer
     api.state.projects = projects
