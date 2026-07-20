@@ -423,6 +423,7 @@ class CommunityModelManager:
                 [path for suffix in ("*.wav", "*.mp3", "*.flac", "*.ogg", "*.m4a") for path in extract_root.rglob(suffix)],
                 key=lambda path: ("reference_audios" not in str(path).lower(), str(path)),
             )
+            destination.parent.mkdir(parents=True, exist_ok=True)
             os.replace(extract_root, destination)
             gpt_path = destination / gpt_files[0].relative_to(extract_root)
             sovits_path = destination / sovits_files[0].relative_to(extract_root)
