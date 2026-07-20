@@ -2,7 +2,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from app.adapters.subprocess_adapter import SubprocessAdapter
-from engine_runtime import has_override, resolve_torch_device
+from engine_runtime import detect_gpt_sovits_version, has_override, recommended_gpt_sovits_sample_steps, resolve_torch_device
 
 
 def test_blank_gpt_device_uses_available_accelerator():
@@ -15,6 +15,15 @@ def test_blank_gpt_device_uses_available_accelerator():
     assert has_override("") is False
     assert has_override("   ") is False
     assert has_override(False) is True
+
+
+def test_gpt_sovits_defaults_follow_loaded_or_weight_version():
+    assert detect_gpt_sovits_version({"version": "v3"}, "v4") == "v4"
+    assert detect_gpt_sovits_version({"version": "auto", "vits_weights_path": r"D:\models\v4\hutao.pth"}) == "v4"
+    assert detect_gpt_sovits_version({"version": "auto", "t2s_weights_path": r"D:\models\v2ProPlus\voice.ckpt"}) == "v2ProPlus"
+    assert detect_gpt_sovits_version({"version": "auto", "vits_weights_path": r"D:\models\v1\legacy.pth"}) == "v1"
+    assert recommended_gpt_sovits_sample_steps("v3") == 32
+    assert recommended_gpt_sovits_sample_steps("v4") == 8
 
 
 def test_cancel_current_terminates_worker_without_waiting_for_adapter_lock(tmp_path: Path):

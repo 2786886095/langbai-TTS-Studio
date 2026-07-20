@@ -2,6 +2,27 @@ export type EngineId = "indextts2" | "voxcpm" | "gpt_sovits";
 export type FieldType = "range" | "number" | "text" | "select" | "toggle" | "file" | "textarea";
 export type Field = { key: string; label: string; type: FieldType; default: string | number | boolean; help: string; min?: number; max?: number; step?: number; options?: string[]; unit?: string; fileKind?: "audio" | "gpt-weight" | "sovits-weight" | "directory" | "yaml" | "lora" };
 export type Group = { title: string; summary: string; fields: Field[] };
+export type GptSovitsVersion = "auto" | "v1" | "v2" | "v3" | "v4" | "v2Pro" | "v2ProPlus";
+
+const gptSovitsVersions: GptSovitsVersion[] = ["auto", "v1", "v2", "v3", "v4", "v2Pro", "v2ProPlus"];
+
+export function resolveGptSovitsVersion(parameters: Record<string, unknown>): GptSovitsVersion {
+  const selected = String(parameters.version ?? "auto") as GptSovitsVersion;
+  if (gptSovitsVersions.includes(selected) && selected !== "auto") return selected;
+  const paths = `${parameters.gpt_weights_path ?? parameters.t2s_weights_path ?? ""} ${parameters.sovits_weights_path ?? parameters.vits_weights_path ?? ""}`.toLowerCase();
+  if (/(?:^|[\\/_-])v2proplus(?:[\\/_-]|$)/i.test(paths)) return "v2ProPlus";
+  if (/(?:^|[\\/_-])v2pro(?:[\\/_-]|$)/i.test(paths)) return "v2Pro";
+  if (/(?:^|[\\/_-])v4(?:[\\/_-]|$)/i.test(paths)) return "v4";
+  if (/(?:^|[\\/_-])v3(?:[\\/_-]|$)/i.test(paths)) return "v3";
+  if (/(?:^|[\\/_-])v2(?:[\\/_-]|$)/i.test(paths)) return "v2";
+  if (/(?:^|[\\/_-])v1(?:[\\/_-]|$)/i.test(paths)) return "v1";
+  return "auto";
+}
+
+export function gptSovitsDefaultsFor(parameters: Record<string, unknown>) {
+  const version = resolveGptSovitsVersion(parameters);
+  return { version, sample_steps: version === "v3" ? 32 : 8, super_sampling: false };
+}
 
 export const engines: Record<EngineId, { name: string; description: string; accent: string }> = {
   indextts2: { name: "IndexTTS 2", description: "参考音频克隆 · 情感解耦", accent: "#2563eb" },
@@ -102,7 +123,7 @@ export const parameterGroups: Record<EngineId, Group[]> = {
     { title: "角色模型与参考", summary: "GPT/SoVITS 权重、参考音频与精确文本", fields: [
       { key: "gpt_weights_path", label: "GPT 权重（.ckpt）", type: "file", fileKind: "gpt-weight", default: "", help: "必填。决定语义与韵律能力；必须与下方 SoVITS 权重属于同一角色模型。" },
       { key: "sovits_weights_path", label: "SoVITS 权重（.pth）", type: "file", fileKind: "sovits-weight", default: "", help: "必填。决定声学音色；必须与 GPT 权重成对使用，不能混用其他角色。" },
-      { key: "version", label: "模型版本", type: "select", default: "auto", options: ["auto", "v2", "v3", "v4", "v2Pro", "v2ProPlus"], help: "auto 交由权重与 YAML 自动识别；只有确认训练版本时才手动指定。" },
+      { key: "version", label: "模型版本", type: "select", default: "auto", options: ["auto", "v1", "v2", "v3", "v4", "v2Pro", "v2ProPlus"], help: "auto 会从权重路径和实际加载结果识别版本，并自动套用对应采样默认值。" },
       { key: "ref_audio_path", label: "主参考音频", type: "file", fileKind: "audio", default: "", help: "必填。用于确定当前说话风格，建议 3–10 秒、单人、清晰无混响。" },
       { key: "aux_ref_audio_paths", label: "辅助参考音频", type: "file", fileKind: "audio", default: "", help: "可加入一条辅助参考，融合音色与语气。" },
       { key: "prompt_text", label: "参考音频文本", type: "textarea", default: "", help: "精确转写；留空时相似度可能下降。" },
@@ -123,8 +144,8 @@ export const parameterGroups: Record<EngineId, Group[]> = {
       { key: "streaming_mode", label: "流式模式", type: "select", default: "0｜关闭", options: ["0｜关闭", "1｜最高质量", "2｜平衡", "3｜低延迟"], help: "数值越高首包越快，但衔接可能下降。" },
       { key: "parallel_infer", label: "并行推理", type: "toggle", default: true, help: "并行生成片段；关闭可降低显存峰值。" },
       { key: "repetition_penalty", label: "重复惩罚", type: "number", default: 1.35, min: 0.5, max: 3, step: 0.05, help: "抑制重复音节；过高可能漏字。" },
-      { key: "sample_steps", label: "VITS 采样步数", type: "number", default: 32, min: 4, max: 64, step: 1, help: "V3 模型采样步数；不支持时后端忽略。" },
-      { key: "super_sampling", label: "超采样", type: "toggle", default: false, help: "高质量后处理，会增加时间和显存。" },
+      { key: "sample_steps", label: "VITS 采样步数", type: "number", default: 8, min: 4, max: 128, step: 1, help: "按版本自动适配：v3 默认 32，v4 默认 8；v1、v2 与 Pro 系列不使用该参数。手动修改后保留自定义值。" },
+      { key: "super_sampling", label: "超采样", type: "toggle", default: false, help: "仅 v3 支持；其他版本会自动关闭。会增加生成时间和显存。" },
       { key: "overlap_length", label: "流式重叠长度", type: "number", default: 2, min: 0, max: 16, step: 1, help: "流式块之间重叠，减轻接缝。" },
       { key: "min_chunk_length", label: "最小流式块长度", type: "number", default: 16, min: 1, max: 128, step: 1, help: "越小首包越快，但调用更频繁。" },
       { key: "media_type", label: "API 媒体格式", type: "select", default: "wav", options: ["wav", "raw", "ogg", "aac"], help: "引擎直接返回格式；最终导出由输出设置决定。" },
@@ -141,4 +162,7 @@ export const parameterGroups: Record<EngineId, Group[]> = {
   ],
 };
 
-export const defaultsFor = (engine: EngineId) => Object.fromEntries(parameterGroups[engine].flatMap(g => g.fields).map(f => [f.key, f.default]));
+export const defaultsFor = (engine: EngineId, context: Record<string, unknown> = {}) => {
+  const defaults = Object.fromEntries(parameterGroups[engine].flatMap(g => g.fields).map(f => [f.key, f.default]));
+  return engine === "gpt_sovits" ? { ...defaults, ...gptSovitsDefaultsFor(context) } : defaults;
+};

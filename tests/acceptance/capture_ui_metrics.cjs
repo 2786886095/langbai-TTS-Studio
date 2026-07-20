@@ -1,5 +1,6 @@
 const { app, BrowserWindow } = require("electron");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 
 const projectRoot = path.resolve(__dirname, "..", "..");
@@ -12,7 +13,9 @@ const slugs = ["studio", "tasks", "audio-library", "history", "settings"];
 
 const DEFAULT_VIEWPORT = { width: 1920, height: 1080 };
 const MINIMUM_VIEWPORT = { width: 1180, height: 720 };
+const isolatedUserData = fs.mkdtempSync(path.join(os.tmpdir(), "langbai-ui-acceptance-"));
 
+app.setPath("userData", isolatedUserData);
 app.commandLine.appendSwitch("force-device-scale-factor", "1");
 if (process.env.CI) {
   app.commandLine.appendSwitch("disable-gpu");

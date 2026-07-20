@@ -6,7 +6,7 @@ import {
   Save, Search, Settings, SlidersHorizontal, Sparkles, Square, Upload, WandSparkles,
   X, Zap, UserRoundCog, Store, SquareTerminal, GraduationCap,
 } from "lucide-react";
-import { defaultsFor, engines, parameterGroups, type EngineId, type Field } from "./parameterSchemas";
+import { defaultsFor, engines, gptSovitsDefaultsFor, parameterGroups, resolveGptSovitsVersion, type EngineId, type Field } from "./parameterSchemas";
 import { EngineManager } from "./EngineManager";
 import { WorkspacePage } from "./WorkspacePages";
 import { Onboarding } from "./Onboarding";
@@ -20,6 +20,7 @@ type Job = { id: string; title: string; engine: EngineId; progress: number; stat
 type ApiEngineStatus = { id?: string; name?: string; state?: string; available?: boolean };
 type AppSettings = { defaultEngine?: string; autoRevealOutput?: boolean; updateChannel?: "stable" | "beta" };
 type UpdateEvent = { state: "checking" | "available" | "current" | "downloading" | "downloaded" | "error"; info?: { version?: string }; progress?: { percent?: number; bytesPerSecond?: number }; message?: string };
+type ParameterPreset = { id: string; name: string; engine: EngineId; parameters: Record<string, unknown>; updatedAt: string };
 
 declare global {
   interface Window {
@@ -43,6 +44,15 @@ declare global {
 const initialJobs: Job[] = [];
 const apiBase = new URLSearchParams(window.location.search).get("backendUrl") ?? "";
 const apiUrl = (path: string) => `${apiBase}${path}`;
+const parameterPresetStorageKey = "langbai-parameter-presets-v1";
+
+function loadParameterPresets(): ParameterPreset[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(parameterPresetStorageKey) ?? "[]") as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((item): item is ParameterPreset => Boolean(item && typeof item === "object" && isEngineId((item as ParameterPreset).engine) && typeof (item as ParameterPreset).id === "string" && typeof (item as ParameterPreset).name === "string" && typeof (item as ParameterPreset).updatedAt === "string" && (item as ParameterPreset).parameters && typeof (item as ParameterPreset).parameters === "object"));
+  } catch { return []; }
+}
 
 function FieldControl({ field, value, onChange }: { field: Field; value: unknown; onChange: (value: unknown) => void }) {
   const id = `field-${field.key}`;
@@ -72,6 +82,16 @@ function normalizeJob(raw: Record<string, unknown>): Job {
   };
 }
 function statusValueLabel(status: Job["status"]) { return status === "running" ? "生成中" : status === "queued" ? "排队" : status === "done" ? "已完成" : status === "cancelled" ? "已取消" : "失败"; }
+
+function applyGptSovitsVersionTransition(previous: Record<string, unknown>, next: Record<string, unknown>) {
+  const previousDefaults = gptSovitsDefaultsFor(previous);
+  const nextDefaults = gptSovitsDefaultsFor(next);
+  const usedPreviousDefault = Number(previous.sample_steps ?? previousDefaults.sample_steps) === previousDefaults.sample_steps;
+  const result = { ...next };
+  if (usedPreviousDefault && previousDefaults.version !== nextDefaults.version) result.sample_steps = nextDefaults.sample_steps;
+  if (nextDefaults.version !== "v3") result.super_sampling = false;
+  return result;
+}
 
 const longAudioKeys = new Set(["split_mode", "segment_chars", "segment_pause", "retry_count", "resume", "keep_segments", "output_format", "sample_rate"]);
 const languageCodes: Record<string, string> = { 中文: "zh", 英文: "en", 日文: "ja", 韩文: "ko", 粤语: "yue", 中英混合: "auto", 日英混合: "auto", 多语种混合: "auto" };
@@ -111,6 +131,8 @@ function fromProjectParams(engine: EngineId, saved: Record<string, unknown>, lon
       const prefix = String(saved.streaming_mode);
       restored.streaming_mode = parameterGroups.gpt_sovits.flatMap(group => group.fields).find(field => field.key === "streaming_mode")?.options?.find(option => option.startsWith(prefix)) ?? saved.streaming_mode;
     }
+    if (saved.sample_steps === undefined) restored.sample_steps = gptSovitsDefaultsFor(restored).sample_steps;
+    if (resolveGptSovitsVersion(restored) !== "v3") restored.super_sampling = false;
   }
   if (saved.segment_chars === undefined && longAudio.maxChars !== undefined) restored.segment_chars = longAudio.maxChars;
   if (saved.segment_pause === undefined && longAudio.silenceMs !== undefined) restored.segment_pause = longAudio.silenceMs;
@@ -144,6 +166,7 @@ function toApiParams(engine: EngineId, values: Record<string, unknown>) {
     const { mode: _mode, voice_instruction, reference_wav_path, prompt_wav_path, ...rest } = clean;
     return { ...rest, control: voice_instruction || null, reference_audio: reference_wav_path || null, prompt_audio: prompt_wav_path || null };
   }
+  const versionDefaults = gptSovitsDefaultsFor(clean);
   const { gpt_weights_path, sovits_weights_path, ref_audio_path, aux_ref_audio_paths, prompt_lang, text_lang, is_half, ...rest } = clean;
   return {
     ...rest, t2s_weights_path: gpt_weights_path, vits_weights_path: sovits_weights_path,
@@ -151,6 +174,7 @@ function toApiParams(engine: EngineId, values: Record<string, unknown>) {
     prompt_language: languageCodes[String(prompt_lang)] ?? "auto", text_language: languageCodes[String(text_lang)] ?? "auto",
     is_half: is_half === "跟随配置" ? null : is_half === "开启",
     text_split_method: String(rest.text_split_method).split("｜")[0], streaming_mode: Number(String(rest.streaming_mode).split("｜")[0]),
+    sample_steps_auto: Number(rest.sample_steps) === versionDefaults.sample_steps,
   };
 }
 
@@ -182,6 +206,10 @@ export function App() {
   const [selectedVoiceId, setSelectedVoiceId] = useState<Record<EngineId, string>>({ indextts2: "", voxcpm: "", gpt_sovits: "" });
   const [voiceDraft, setVoiceDraft] = useState<VoiceProfileDraft | null>(null);
   const [parameterDrawerOpen, setParameterDrawerOpen] = useState(false);
+  const [parameterPresets, setParameterPresets] = useState<ParameterPreset[]>(loadParameterPresets);
+  const [selectedParameterPreset, setSelectedParameterPreset] = useState<Record<EngineId, string>>({ indextts2: "", voxcpm: "", gpt_sovits: "" });
+  const [parameterPresetDialogOpen, setParameterPresetDialogOpen] = useState(false);
+  const [parameterPresetDraftName, setParameterPresetDraftName] = useState("");
   const [updateEvent, setUpdateEvent] = useState<UpdateEvent | null>(null);
   const [updateDismissed, setUpdateDismissed] = useState(false);
   const updateChannelRef = useRef<"stable" | "beta">("stable");
@@ -194,6 +222,9 @@ export function App() {
   const sentenceCount = useMemo(() => text.split(/[。！？\n]+/).filter(Boolean).length, [text]);
   const visibleGroups = useMemo(() => parameterGroups[engine].map(group => ({ ...group, fields: group.fields.filter(field => !search || `${field.label}${field.help}${field.key}`.toLowerCase().includes(search.toLowerCase())) })).filter(group => !search || group.fields.length), [engine, search]);
   const currentVoiceProfiles = useMemo(() => voiceProfiles.filter(profile => profile.engine === engine), [voiceProfiles, engine]);
+  const currentParameterPresets = useMemo(() => parameterPresets.filter(preset => preset.engine === engine).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)), [parameterPresets, engine]);
+
+  useEffect(() => { localStorage.setItem(parameterPresetStorageKey, JSON.stringify(parameterPresets)); }, [parameterPresets]);
 
   const refreshVoiceProfiles = async () => {
     try {
@@ -206,12 +237,53 @@ export function App() {
 
   const useVoiceProfile = (profile: VoiceProfile) => {
     setEngine(profile.engine);
-    setParams(current => ({ ...current, [profile.engine]: { ...current[profile.engine], ...profile.parameters } }));
+    setParams(current => {
+      const merged = { ...current[profile.engine], ...profile.parameters };
+      return { ...current, [profile.engine]: profile.engine === "gpt_sovits" ? applyGptSovitsVersionTransition(current[profile.engine], merged) : merged };
+    });
     setSelectedVoiceId(current => ({ ...current, [profile.engine]: profile.id }));
     setGroupsOpen(current => ({ ...current, [parameterGroups[profile.engine][0].title]: true }));
     setActiveNav("创作台");
     setNotice(`已应用角色声音“${profile.name}”。`);
     void refreshVoiceProfiles();
+  };
+
+  const applyParameterPreset = (presetId: string) => {
+    setSelectedParameterPreset(current => ({ ...current, [engine]: presetId }));
+    const preset = parameterPresets.find(item => item.id === presetId && item.engine === engine);
+    if (!preset) return;
+    const restored = { ...defaultsFor(engine, preset.parameters), ...preset.parameters };
+    if (engine === "gpt_sovits" && resolveGptSovitsVersion(restored) !== "v3") restored.super_sampling = false;
+    setParams(current => ({ ...current, [engine]: restored }));
+    setNotice(`已应用参数预设“${preset.name}”。`);
+  };
+
+  const saveParameterPreset = () => {
+    const selected = currentParameterPresets.find(item => item.id === selectedParameterPreset[engine]);
+    setParameterPresetDraftName(selected?.name ?? `${engines[engine].name} 参数 ${currentParameterPresets.length + 1}`);
+    setParameterPresetDialogOpen(true);
+  };
+
+  const confirmParameterPresetSave = () => {
+    const selected = currentParameterPresets.find(item => item.id === selectedParameterPreset[engine]);
+    const name = parameterPresetDraftName.trim();
+    if (!name) { setNotice("参数预设名称不能为空。"); return; }
+    const now = new Date().toISOString();
+    const id = selected?.id ?? crypto.randomUUID();
+    const preset: ParameterPreset = { id, name, engine, parameters: { ...currentParams }, updatedAt: now };
+    setParameterPresets(current => [preset, ...current.filter(item => item.id !== id)]);
+    setSelectedParameterPreset(current => ({ ...current, [engine]: id }));
+    setParameterPresetDialogOpen(false);
+    setNotice(selected ? `参数预设“${name}”已更新。` : `参数预设“${name}”已保存。`);
+  };
+
+  const deleteParameterPreset = () => {
+    const id = selectedParameterPreset[engine];
+    const preset = currentParameterPresets.find(item => item.id === id);
+    if (!preset || !window.confirm(`删除参数预设“${preset.name}”？`)) return;
+    setParameterPresets(current => current.filter(item => item.id !== id));
+    setSelectedParameterPreset(current => ({ ...current, [engine]: "" }));
+    setNotice(`参数预设“${preset.name}”已删除。`);
   };
 
   const saveCurrentVoice = () => {
@@ -522,7 +594,7 @@ export function App() {
         <section className="editor-panel"><div className="panel-heading"><div className="section-label compact"><span>02</span><div><strong>输入内容</strong><small>自动识别段落与标点</small></div></div><div className="editor-actions"><button onClick={importText}><Upload size={15} />导入 TXT</button><button onClick={async () => { const clip = await navigator.clipboard.readText(); if (clip) setText(clip); }}><FileText size={15} />粘贴纯文本</button><button className="parameter-entry" onClick={() => openParameterGroup()}><SlidersHorizontal size={16} />推理参数<span>{parameterGroups[engine].reduce((total, group) => total + group.fields.length, 0)}</span></button></div></div><div className="document-title"><input aria-label="任务名称" value={projectName} onChange={event => setProjectName(event.target.value)} /><span>{projectId ? "已保存项目" : "未保存"}</span></div><textarea className="script-editor" aria-label="要生成的文本" value={text} onChange={e => setText(e.target.value)} placeholder="输入或粘贴需要生成的长文本…" /><div className="editor-footer"><div><span>{text.replace(/\s/g, "").length} 字</span><span>{sentenceCount} 个句段</span><span>预计 {Math.max(1, Math.ceil(text.length / 250))} 分钟</span></div></div><div className="segment-preview"><div><span className="preview-icon"><FileAudio size={17} /></span><div><strong>长音频分段预览 · 无软件时长上限</strong><p>约 {Math.max(1, Math.ceil(text.length / Number(currentParams.segment_chars ?? 180)))} 段 · 分段落盘 · 断点续作 · 流式合并（受本机磁盘与模型稳定性限制）</p></div></div><button onClick={() => openParameterGroup("长音频与输出")}>调整设置<ChevronRight size={14} /></button></div></section>
       </div>
 
-      <div className={`parameter-drawer-layer ${parameterDrawerOpen ? "is-open" : ""}`} aria-hidden={!parameterDrawerOpen}><button className="parameter-scrim" aria-label="关闭推理参数" onClick={() => setParameterDrawerOpen(false)} /><aside className="parameter-panel parameter-drawer" role="dialog" aria-modal="true" aria-labelledby="parameter-drawer-title"><div className="parameter-drawer-head"><div><p className="eyebrow">{engines[engine].name}</p><h2 id="parameter-drawer-title">推理参数</h2><span>{parameterGroups[engine].reduce((total, group) => total + group.fields.length, 0)} 项设置 · 修改立即保存到当前方案</span></div><button className="icon-button" aria-label="关闭推理参数" onClick={() => setParameterDrawerOpen(false)}><X size={18} /></button></div><div className="parameter-drawer-tools"><label className="parameter-search"><Search size={15} /><input value={search} onChange={e => setSearch(e.target.value)} placeholder="搜索参数名称或用途" />{search && <button onClick={() => setSearch("")}><X size={14} /></button>}</label><div className="parameter-jump-list">{parameterGroups[engine].map((group, index) => <button key={group.title} onClick={() => { setGroupsOpen(prev => ({ ...prev, [group.title]: true })); document.getElementById(`parameter-group-${index}`)?.scrollIntoView({ block: "start", behavior: "smooth" }); }}>{group.title}<span>{group.fields.length}</span></button>)}</div></div><div className="parameter-scroll">{visibleGroups.map(group => { const index = parameterGroups[engine].findIndex(item => item.title === group.title); return <section className="parameter-group" id={`parameter-group-${index}`} key={group.title}><button className="group-trigger" onClick={() => setGroupsOpen(prev => ({ ...prev, [group.title]: !prev[group.title] }))}><div><strong>{group.title}</strong><span>{group.fields.length} 项 · {group.summary}</span></div>{groupsOpen[group.title] || search ? <ChevronDown size={17} /> : <ChevronRight size={17} />}</button>{(groupsOpen[group.title] || search) && <div className="group-fields">{group.fields.map(field => <FieldControl key={field.key} field={field} value={currentParams[field.key]} onChange={value => setParams(prev => ({ ...prev, [engine]: { ...prev[engine], [field.key]: value } }))} />)}</div>}</section>; })}</div><div className="parameter-footer drawer-footer"><div><Info size={14} /><span>每项均附中文用途与调试说明</span></div><span><button className="secondary-button" onClick={() => setParams(prev => ({ ...prev, [engine]: defaultsFor(engine) }))}><RotateCcw size={15} />恢复默认</button><button className="secondary-button" onClick={() => setParameterDrawerOpen(false)}>完成设置</button><button className="primary-button" onClick={submit} disabled={generating}><Zap size={16} />生成音频</button></span></div></aside></div>
+      <div className={`parameter-drawer-layer ${parameterDrawerOpen ? "is-open" : ""}`} aria-hidden={!parameterDrawerOpen}><button className="parameter-scrim" aria-label="关闭推理参数" onClick={() => setParameterDrawerOpen(false)} /><aside className="parameter-panel parameter-drawer" role="dialog" aria-modal="true" aria-labelledby="parameter-drawer-title"><div className="parameter-drawer-head"><div><p className="eyebrow">{engines[engine].name}</p><h2 id="parameter-drawer-title">推理参数</h2><span>{parameterGroups[engine].reduce((total, group) => total + group.fields.length, 0)} 项设置 · 修改立即保存到当前方案</span></div><button className="icon-button" aria-label="关闭推理参数" onClick={() => setParameterDrawerOpen(false)}><X size={18} /></button></div><div className="parameter-drawer-tools"><div className="parameter-preset-bar"><label><span>参数预设</span><select value={selectedParameterPreset[engine]} onChange={event => applyParameterPreset(event.target.value)}><option value="">当前临时参数</option>{currentParameterPresets.map(preset => <option key={preset.id} value={preset.id}>{preset.name}</option>)}</select></label><button className="secondary-button" onClick={saveParameterPreset}><Save size={15} />{selectedParameterPreset[engine] ? "更新预设" : "保存为预设"}</button>{selectedParameterPreset[engine] && <button className="secondary-button preset-delete" onClick={deleteParameterPreset}><X size={15} />删除</button>}</div><label className="parameter-search"><Search size={15} /><input value={search} onChange={e => setSearch(e.target.value)} placeholder="搜索参数名称或用途" />{search && <button onClick={() => setSearch("")}><X size={14} /></button>}</label><div className="parameter-jump-list">{parameterGroups[engine].map((group, index) => <button key={group.title} onClick={() => { setGroupsOpen(prev => ({ ...prev, [group.title]: true })); document.getElementById(`parameter-group-${index}`)?.scrollIntoView({ block: "start", behavior: "smooth" }); }}>{group.title}<span>{group.fields.length}</span></button>)}</div></div><div className="parameter-scroll">{visibleGroups.map(group => { const index = parameterGroups[engine].findIndex(item => item.title === group.title); return <section className="parameter-group" id={`parameter-group-${index}`} key={group.title}><button className="group-trigger" onClick={() => setGroupsOpen(prev => ({ ...prev, [group.title]: !prev[group.title] }))}><div><strong>{group.title}</strong><span>{group.fields.length} 项 · {group.summary}</span></div>{groupsOpen[group.title] || search ? <ChevronDown size={17} /> : <ChevronRight size={17} />}</button>{(groupsOpen[group.title] || search) && <div className="group-fields">{group.fields.map(field => <FieldControl key={field.key} field={field} value={currentParams[field.key]} onChange={value => setParams(prev => { const next = { ...prev[engine], [field.key]: value }; return { ...prev, [engine]: engine === "gpt_sovits" ? applyGptSovitsVersionTransition(prev[engine], next) : next }; })} />)}</div>}</section>; })}</div><div className="parameter-footer drawer-footer"><div><Info size={14} /><span>每项均附中文用途与调试说明</span></div><span><button className="secondary-button" onClick={() => setParams(prev => ({ ...prev, [engine]: defaultsFor(engine, prev[engine]) }))}><RotateCcw size={15} />恢复当前版本默认</button><button className="secondary-button" onClick={() => setParameterDrawerOpen(false)}>完成设置</button><button className="primary-button" onClick={submit} disabled={generating}><Zap size={16} />生成音频</button></span></div></aside></div>
 
       {previewAudio && <section className="studio-audio-player" aria-label="生成音频试听"><div><span className="studio-player-icon"><AudioLines size={18} /></span><span><strong>正在试听</strong><small>{previewAudio.title}</small></span></div><audio src={previewAudio.url} controls autoPlay /><button className="icon-button" onClick={() => setPreviewAudio(null)} aria-label="关闭试听"><X size={17} /></button></section>}
       <section className={`queue-drawer ${queueOpen ? "is-open" : ""}`}>
@@ -539,6 +611,7 @@ export function App() {
     {updateEvent && !updateDismissed && ["available", "downloading", "downloaded", "error"].includes(updateEvent.state) && <aside className={`global-update-notice ${updateEvent.state}`} role="status" aria-live="polite"><span className="global-update-icon">{updateEvent.state === "downloading" ? <Download size={21} /> : <BellRing size={21} />}</span><div><p className="eyebrow">软件更新</p><strong>{updateEvent.state === "available" ? `发现新版本 ${updateEvent.info?.version ?? ""}` : updateEvent.state === "downloading" ? `正在下载 ${Math.round(updateEvent.progress?.percent ?? 0)}%` : updateEvent.state === "downloaded" ? `新版本 ${updateEvent.info?.version ?? ""} 已准备好` : "更新检查遇到问题"}</strong><small>{updateEvent.state === "available" ? "可直接在软件内下载，当前任务不会被中断。" : updateEvent.state === "downloading" ? "下载完成后会提示重启安装。" : updateEvent.state === "downloaded" ? "重启软件即可完成更新。" : updateEvent.message || "可稍后在设置中重新检查。"}</small>{updateEvent.state === "downloading" && <div className="global-update-progress"><i style={{ width: `${Math.round(updateEvent.progress?.percent ?? 0)}%` }} /></div>}</div><div className="global-update-actions">{updateEvent.state === "available" && <button className="primary-button" onClick={() => void downloadAvailableUpdate()}>立即下载</button>}{updateEvent.state === "downloaded" && <button className="primary-button" onClick={installAvailableUpdate}>重启安装</button>}{updateEvent.state !== "downloading" && <button className="icon-button" aria-label="稍后提醒" onClick={() => setUpdateDismissed(true)}><X size={16} /></button>}</div></aside>}
     {showOnboarding && <Onboarding onDone={finishOnboarding} onSetup={() => setActiveNav("settings")} />}
     {projectLibraryOpen && <ProjectLibrary apiUrl={apiUrl} currentProjectId={projectId} onClose={() => setProjectLibraryOpen(false)} onOpen={openProject} onRequestNew={requestNewProject} onDeletedCurrent={() => clearProject("当前项目已删除，编辑器已切换为空白项目。")}/>}
+    {parameterPresetDialogOpen && <div className="project-confirm-overlay parameter-preset-dialog-overlay" role="presentation"><div className="project-confirm-dialog parameter-preset-dialog" role="dialog" aria-modal="true" aria-labelledby="parameter-preset-dialog-title"><span className="project-confirm-icon"><SlidersHorizontal size={22} /></span><h3 id="parameter-preset-dialog-title">保存参数预设</h3><p>预设仅属于 {engines[engine].name}，会保存当前全部推理、模型路径和长音频参数。</p><input autoFocus value={parameterPresetDraftName} onChange={event => setParameterPresetDraftName(event.target.value)} onKeyDown={event => { if (event.key === "Enter") confirmParameterPresetSave(); }} placeholder="例如：胡桃 v4 高质量" aria-label="参数预设名称" /><div><button className="secondary-button" onClick={() => setParameterPresetDialogOpen(false)}>取消</button><button className="primary-button" onClick={confirmParameterPresetSave}><Save size={15} />确认保存</button></div></div></div>}
     {cancelTarget && <div className="project-confirm-overlay generation-cancel-overlay" role="presentation"><div className="project-confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="generation-cancel-title"><span className="project-confirm-icon danger"><Square size={20} fill="currentColor" /></span><h3 id="generation-cancel-title">取消这次配音生成？</h3><p>“{cancelTarget.title}”将立即停止当前模型推理。已经完成的长音频分段会保留，之后可以从断点重试。</p><div><button className="secondary-button" onClick={() => setCancelTarget(null)}>继续生成</button><button className="danger-button" onClick={() => void cancelJob(cancelTarget.id)}>确认取消</button></div></div></div>}
     {confirmNewProject && <div className="project-confirm-overlay new-project-confirm-overlay" role="presentation"><div className="project-confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="new-project-confirm-title"><span className="project-confirm-icon"><Plus size={24} /></span><h3 id="new-project-confirm-title">新建空白项目？</h3><p>当前编辑器内容会被清空。已经保存的项目仍保留在项目库中；尚未保存的修改无法恢复。</p><div><button className="secondary-button" onClick={() => setConfirmNewProject(false)}>继续编辑</button><button className="primary-button" onClick={newProject}>确认新建</button></div></div></div>}
   </div>;
