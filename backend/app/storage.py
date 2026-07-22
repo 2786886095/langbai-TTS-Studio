@@ -3,17 +3,28 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import threading
 from pathlib import Path
+from typing import Callable
 
 from .models import JobManifest
 
 
 class JobStore:
-    def __init__(self, root: str | Path):
+    def __init__(self, root: str | Path, output_directory: str | Path | Callable[[], str | Path] | None = None):
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
+        self._output_directory = output_directory
         self._lock = threading.RLock()
+
+    def output_dir(self) -> Path:
+        raw = self._output_directory() if callable(self._output_directory) else self._output_directory
+        path = Path(raw or (self.root.parent / "output")).resolve()
+        if path == Path(path.anchor):
+            raise ValueError("output directory cannot be a drive root")
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
     def job_dir(self, job_id: str) -> Path:
         if not re.fullmatch(r"[0-9a-f]{32}", job_id):
@@ -60,3 +71,10 @@ class JobStore:
                     continue
         jobs.sort(key=lambda item: item.created_at, reverse=True)
         return jobs
+
+    def delete(self, job_id: str) -> None:
+        path = self.job_dir(job_id)
+        with self._lock:
+            if not path.is_dir():
+                raise FileNotFoundError(job_id)
+            shutil.rmtree(path)

@@ -291,10 +291,14 @@ class SettingsPatch(BaseModel):
 
 
 class SettingsStore:
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, *, default_output_directory: str | Path | None = None):
         self.path = Path(path).resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.default_output_directory = Path(default_output_directory).resolve() if default_output_directory else None
         self._lock = threading.RLock()
+
+    def _defaults(self) -> GlobalSettings:
+        return GlobalSettings(outputDirectory=str(self.default_output_directory) if self.default_output_directory else None)
 
     @staticmethod
     def _migrate(payload: dict[str, Any]) -> dict[str, Any]:
@@ -320,7 +324,7 @@ class SettingsStore:
     def get(self) -> GlobalSettings:
         with self._lock:
             if not self.path.is_file():
-                settings = GlobalSettings()
+                settings = self._defaults()
                 atomic_write_json(self.path, settings.model_dump(mode="json", by_alias=True))
                 return settings
             if self.path.is_symlink():
@@ -329,7 +333,10 @@ class SettingsStore:
                 payload = json.loads(self.path.read_text(encoding="utf-8"))
                 version = payload.get("schemaVersion", payload.get("schema_version", 0))
                 settings = GlobalSettings.model_validate(self._migrate(payload))
-                if version == 0:
+                if settings.output_directory is None and self.default_output_directory is not None:
+                    settings = settings.model_copy(update={"output_directory": str(self.default_output_directory)})
+                    settings = GlobalSettings.model_validate(settings.model_dump())
+                if version == 0 or payload.get("outputDirectory") is None:
                     atomic_write_json(self.path, settings.model_dump(mode="json", by_alias=True))
                 return settings
             except UnsupportedSchema:

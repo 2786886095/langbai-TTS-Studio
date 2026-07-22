@@ -224,6 +224,31 @@ class SubprocessAdapter(EngineAdapter):
             "required_parameters": self.required_parameters,
         }
 
+    def runtime_snapshot(self, lines: int = 160) -> dict[str, Any]:
+        process = self._process
+        running = process is not None and process.poll() is None
+        log_path = self.log_dir / f"{self.engine_id}.log"
+        log_lines: list[str] = []
+        if log_path.is_file():
+            try:
+                with log_path.open("r", encoding="utf-8", errors="replace") as handle:
+                    log_lines = handle.readlines()[-max(20, min(lines, 500)):]
+            except OSError:
+                log_lines = []
+        return {
+            **self.status(),
+            "running": running,
+            "pid": process.pid if running and process else None,
+            "command": [str(self.python_path), "-u", str(self.backend_root / "engine_worker.py")],
+            "cwd": str(self.project_path),
+            "logPath": str(log_path),
+            "logLines": [line.rstrip("\r\n") for line in log_lines],
+        }
+
+    def start(self) -> None:
+        with self._lock:
+            self._start()
+
     def _start(self) -> None:
         if self._process is not None and self._process.poll() is None:
             return
@@ -276,15 +301,16 @@ class SubprocessAdapter(EngineAdapter):
         with self._lock:
             self._start()
             assert self._process and self._process.stdin and self._process.stdout
+            process = self._process
             try:
-                self._process.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
-                self._process.stdin.flush()
-                line = self._process.stdout.readline()
+                process.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                process.stdin.flush()
+                line = process.stdout.readline()
             except (BrokenPipeError, OSError) as exc:
                 self.close()
                 raise EngineError(f"{self.engine_id} 工作进程意外退出") from exc
             if not line:
-                code = self._process.poll()
+                code = process.poll()
                 self.close()
                 raise EngineError(f"{self.engine_id} 工作进程无响应（退出码 {code}），详见日志")
             try:
@@ -297,6 +323,25 @@ class SubprocessAdapter(EngineAdapter):
                 raise EngineError(response.get("error") or f"{self.engine_id} 生成失败")
             if not output_path.is_file() or output_path.stat().st_size == 0:
                 raise EngineError(f"{self.engine_id} 未生成有效 WAV 文件")
+
+    def cancel_current(self) -> None:
+        # synthesize() holds the adapter lock while waiting for the worker.
+        # Cancellation bypasses that lock and stops the worker so a long CUDA
+        # inference unblocks immediately.
+        process, self._process = self._process, None
+        if process is not None and process.poll() is None:
+            try:
+                process.terminate()
+                process.wait(timeout=2)
+            except Exception:
+                try:
+                    process.kill()
+                    process.wait(timeout=2)
+                except Exception:
+                    pass
+        if self._log_handle is not None:
+            self._log_handle.close()
+            self._log_handle = None
 
     def close(self) -> None:
         process, self._process = self._process, None
@@ -398,10 +443,31 @@ class AutoDetectAdapter(EngineAdapter):
     def synthesize(self, text: str, output_path: Path, parameters: dict[str, Any]) -> None:
         return self._current().synthesize(text, output_path, parameters)
 
+    def runtime_snapshot(self, lines: int = 160) -> dict[str, Any]:
+        return self._current().runtime_snapshot(lines)
+
+    def start(self) -> None:
+        self._current().start()
+
+    def restart(self) -> None:
+        with self._lock:
+            if self._delegate is not None:
+                self._delegate.close()
+            self._delegate = None
+            self._signature = None
+        self._current().start()
+
     def close(self) -> None:
         with self._lock:
             if self._delegate is not None:
                 self._delegate.close()
+
+    def cancel_current(self) -> None:
+        # Do not call _current(): cancellation must never start a new worker.
+        with self._lock:
+            delegate = self._delegate
+        if delegate is not None:
+            delegate.cancel_current()
 
 
 def build_default_adapters(log_dir: str | Path, install_root: str | Path | None = None, binding_store: EngineBindingStore | None = None) -> dict[str, EngineAdapter]:

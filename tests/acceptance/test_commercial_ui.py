@@ -43,6 +43,42 @@ def test_audio_library_has_real_playback(project_root: Path, commercial_release:
     assert "getAudioUrl" in source, "播放器必须通过受控的 Electron 本地音频 URL 读取输出"
 
 
+def test_audio_records_have_explicit_delete_choices_without_horizontal_drag(project_root: Path, commercial_release: bool) -> None:
+    require_commercial_gate(commercial_release)
+    source = (project_root / "frontend" / "src" / "WorkspacePages.tsx").read_text(encoding="utf-8")
+    styles = (project_root / "frontend" / "src" / "styles.css").read_text(encoding="utf-8")
+    assert "deleteOutput=" in source and "仅删除记录" in source and "记录和音频一起删除" in source, "删除任务必须让用户明确选择是否保留音频"
+    assert "overflow-x: hidden" in styles, "记录列表不得要求用户左右拖动"
+    assert "grid-template-areas" in styles and "flex-wrap: wrap" in styles, "窄窗口必须重排信息和操作按钮，而不是截断或挤出视口"
+
+
+def test_task_title_defaults_to_text_content(project_root: Path, commercial_release: bool) -> None:
+    require_commercial_gate(commercial_release)
+    source = (project_root / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")
+    assert "titleFromText" in source and "effectiveProjectName" in source, "任务名称必须从正文开头自动生成"
+    assert 'title: projectName.trim() || "未命名语音项目"' not in source, "提交任务时不得继续使用固定未命名占位符"
+
+
+def test_completed_job_has_playback_and_reveal_actions(project_root: Path, commercial_release: bool) -> None:
+    require_commercial_gate(commercial_release)
+    source = (project_root / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")
+    assert "playCompletedOutput" in source and "getAudioUrl" in source, "生成完成后必须能在创作台直接试听"
+    assert "试听" in source, "完成任务必须提供明确的试听操作"
+    assert "打开位置" in source and "showItemInFolder" in source, "完成任务必须能在资源管理器中定位输出文件"
+
+
+def test_versioned_gpt_defaults_and_parameter_presets_are_reachable(project_root: Path, commercial_release: bool) -> None:
+    require_commercial_gate(commercial_release)
+    app_source = (project_root / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")
+    schema_source = (project_root / "frontend" / "src" / "parameterSchemas.ts").read_text(encoding="utf-8")
+    worker_source = (project_root / "backend" / "engine_worker.py").read_text(encoding="utf-8")
+    assert "resolveGptSovitsVersion" in app_source and "sample_steps_auto" in app_source, "前端必须按 GPT-SoVITS 版本维护自动默认值"
+    assert 'version === "v3" ? 32 : 8' in schema_source, "v3 与 v4 的采样默认值必须明确区分"
+    assert "loaded_version" in worker_source and "recommended_gpt_sovits_sample_steps" in worker_source, "实际加载的权重版本必须在推理前二次校正默认值"
+    assert "langbai-parameter-presets-v1" in app_source, "参数预设必须跨项目、跨重启持久保存"
+    assert "保存为预设" in app_source and "applyParameterPreset" in app_source, "推理参数抽屉必须能保存并随时套用预设"
+
+
 def test_settings_and_diagnostics_are_reachable_from_ui(project_root: Path, commercial_release: bool) -> None:
     require_commercial_gate(commercial_release)
     frontend = "\n".join(

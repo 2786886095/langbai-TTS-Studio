@@ -65,6 +65,9 @@ def test_settings_persist_revision_conflict_migration_and_future_version_rejecti
         })
         assert changed.status_code == 200, changed.text
         assert changed.json()["revision"] == initial["revision"] + 1
+        generated = client.post("/api/jobs", json={"engine": "indextts2", "text": "自定义目录验证。"})
+        completed = wait_completed(client, generated.json()["id"])
+        assert Path(completed["output_path"]).parent == (tmp_path / "exports").resolve()
         conflict = client.patch("/api/settings", json={
             "expectedRevision": initial["revision"], "theme": "light",
         })
@@ -130,6 +133,67 @@ def test_history_audio_metadata_and_output_path_confinement(tmp_path):
         unsafe = client.get(f"/api/jobs/{job_id}/output")
         assert unsafe.status_code == 409
         assert "越过任务目录" in unsafe.json()["detail"]
+
+
+def test_delete_job_can_preserve_or_remove_generated_audio(tmp_path):
+    with make_client(tmp_path) as client:
+        preserved = client.post("/api/jobs", json={
+            "engine": "indextts2", "text": "保留音频文件。",
+        })
+        preserved_job = wait_completed(client, preserved.json()["id"])
+        preserved_path = Path(preserved_job["output_path"])
+        assert preserved_path.is_file()
+
+        only_record = client.delete(f"/api/jobs/{preserved_job['id']}", params={"deleteOutput": False})
+        assert only_record.status_code == 200, only_record.text
+        assert only_record.json()["outputDeleted"] is False
+        assert preserved_path.is_file()
+        assert client.get(f"/api/jobs/{preserved_job['id']}").status_code == 404
+
+        removed = client.post("/api/jobs", json={
+            "engine": "indextts2", "text": "删除音频文件。",
+        })
+        removed_job = wait_completed(client, removed.json()["id"])
+        removed_path = Path(removed_job["output_path"])
+        assert removed_path.is_file()
+
+        with_file = client.delete(f"/api/jobs/{removed_job['id']}", params={"deleteOutput": True})
+        assert with_file.status_code == 200, with_file.text
+        assert with_file.json()["outputDeleted"] is True
+        assert not removed_path.exists()
+
+
+def test_delete_record_preserves_legacy_internal_output_and_rejects_unsafe_file_delete(tmp_path):
+    with make_client(tmp_path) as client:
+        created = client.post("/api/jobs", json={"engine": "indextts2", "text": "旧版输出兼容。"})
+        job = wait_completed(client, created.json()["id"])
+        job_id = job["id"]
+        manifest_path = tmp_path / "jobs" / job_id / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        generated_path = Path(job["output_path"])
+        legacy_path = manifest_path.parent / generated_path.name
+        generated_path.replace(legacy_path)
+        manifest["output_path"] = str(legacy_path)
+        manifest["output_directory"] = None
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        deleted = client.delete(f"/api/jobs/{job_id}", params={"deleteOutput": False})
+        assert deleted.status_code == 200, deleted.text
+        preserved_path = Path(deleted.json()["preservedOutputPath"])
+        assert preserved_path.is_file()
+        assert preserved_path.parent == (tmp_path / "output").resolve()
+
+        unsafe = client.post("/api/jobs", json={"engine": "indextts2", "text": "异常路径记录。"})
+        unsafe_job = wait_completed(client, unsafe.json()["id"])
+        unsafe_manifest_path = tmp_path / "jobs" / unsafe_job["id"] / "manifest.json"
+        unsafe_manifest = json.loads(unsafe_manifest_path.read_text(encoding="utf-8"))
+        unsafe_manifest["output_path"] = str(tmp_path / "outside.wav")
+        unsafe_manifest["output_directory"] = None
+        unsafe_manifest_path.write_text(json.dumps(unsafe_manifest), encoding="utf-8")
+        protected = client.delete(f"/api/jobs/{unsafe_job['id']}", params={"deleteOutput": True})
+        assert protected.status_code == 409
+        record_only = client.delete(f"/api/jobs/{unsafe_job['id']}", params={"deleteOutput": False})
+        assert record_only.status_code == 200
 
 
 def test_diagnostic_export_is_real_zip_and_update_is_electron_contract(tmp_path):

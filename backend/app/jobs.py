@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import queue
+import re
 import shutil
 import threading
 import uuid
@@ -17,6 +18,17 @@ from .storage import JobStore
 
 
 TEST_ONLY_PARAMETERS = {"mock_fail_segment_once", "mock_segment_delay_ms", "mock_sample_rate"}
+INTERNAL_PARAMETERS = {"gpt_sovits": {"sample_steps_auto"}}
+
+
+def title_from_text(text: str, limit: int = 36) -> str:
+    collapsed = re.sub(r"\s+", " ", text).strip()
+    collapsed = re.sub(r"^[，。！？、；：,.!?;:\-—_\s]+", "", collapsed)
+    if not collapsed:
+        return "语音任务"
+    first_sentence = re.split(r"[。！？!?\n]", collapsed, maxsplit=1)[0].strip()
+    candidate = first_sentence or collapsed
+    return candidate[:limit].rstrip("，。！？、；：,.!?;: -—_") or "语音任务"
 
 
 class EventBroker:
@@ -50,6 +62,7 @@ class JobManager:
         self.adapters = adapters
         self.mock_mode = mock_mode
         self.events = EventBroker()
+        self.session_id = uuid.uuid4().hex
         self._queue: queue.Queue[str | None] = queue.Queue()
         self._cancelled: set[str] = set()
         self._thread: threading.Thread | None = None
@@ -60,16 +73,18 @@ class JobManager:
             return
         self._thread = threading.Thread(target=self._worker_loop, name="tts-job-worker", daemon=True)
         self._thread.start()
-        # Crash recovery: preserve completed segments and resume the rest.
-        for job in reversed(self.store.list()):
+        # A new application session starts with an empty queue. Interrupted work remains
+        # in history as cancelled and can still be retried explicitly.
+        for job in self.store.list():
             if job.status in (JobStatus.queued, JobStatus.running):
                 for segment in job.segments:
                     if segment.status == SegmentStatus.running:
-                        segment.status = SegmentStatus.pending
-                job.status = JobStatus.queued
+                        segment.status = SegmentStatus.failed
+                        segment.error = "软件已关闭"
+                job.status = JobStatus.cancelled
+                job.error = "上次软件关闭后已从生成队列清除，可在历史记录中重试"
                 job.updated_at = now_iso()
                 self.store.save(job)
-                self._queue.put(job.id)
 
     def close(self) -> None:
         self._queue.put(None)
@@ -82,6 +97,7 @@ class JobManager:
         if engine not in ENGINE_PARAMETERS:
             raise ValueError(f"不支持的引擎: {engine}")
         allowed = {item["name"] for item in ENGINE_PARAMETERS[engine]}
+        allowed |= INTERNAL_PARAMETERS.get(engine, set())
         if self.mock_mode:
             allowed |= TEST_ONLY_PARAMETERS
         unknown = sorted(set(supplied) - allowed)
@@ -117,10 +133,12 @@ class JobManager:
         if not segments:
             raise ValueError("文本不能为空")
         job_id = uuid.uuid4().hex
+        requested_title = (request.title or "").strip()
         job = JobManifest(
             id=job_id, engine=request.engine,
-            title=request.title or request.text.strip().replace("\n", " ")[:36],
+            title=requested_title if requested_title and requested_title not in {"未命名语音项目", "未命名语音任务"} else title_from_text(request.text),
             text=request.text, parameters=parameters, long_audio=request.long_audio,
+            session_id=self.session_id,
             segments=[SegmentManifest(id=f"{job_id}:{index}", index=index, text=text) for index, text in enumerate(segments)],
         )
         self.store.save(job)
@@ -129,12 +147,16 @@ class JobManager:
         return job
 
     def list(self) -> list[JobManifest]:
+        return [job for job in self.store.list() if job.session_id == self.session_id]
+
+    def list_all(self) -> list[JobManifest]:
         return self.store.list()
 
     def get(self, job_id: str) -> JobManifest | None:
         return self.store.load(job_id)
 
     def cancel(self, job_id: str) -> JobManifest:
+        adapter_to_cancel: EngineAdapter | None = None
         with self._lock:
             job = self._require(job_id)
             if job.status in (JobStatus.completed, JobStatus.cancelled):
@@ -146,7 +168,11 @@ class JobManager:
                 job.updated_at = now_iso()
                 self.store.save(job)
                 self._emit(job, "job.cancelled")
-            return job
+            elif job.status == JobStatus.running:
+                adapter_to_cancel = self.adapters.get(job.engine)
+        if adapter_to_cancel is not None:
+            adapter_to_cancel.cancel_current()
+        return self._require(job_id)
 
     def retry(self, job_id: str) -> JobManifest:
         with self._lock:
@@ -161,12 +187,51 @@ class JobManager:
                     segment.error = None
             job.status = JobStatus.queued
             job.error = None
+            job.session_id = self.session_id
             job.output_path = None
             job.updated_at = now_iso()
             self.store.save(job)
             self._queue.put(job_id)
             self._emit(job, "job.retried")
             return job
+
+    def delete(self, job_id: str, *, delete_output: bool = False) -> dict[str, Any]:
+        from .library import UnsafeOutputPath, safe_output_path
+
+        with self._lock:
+            job = self._require(job_id)
+            if job.status in (JobStatus.queued, JobStatus.running):
+                raise ValueError("请先取消正在排队或生成中的任务")
+            try:
+                output = safe_output_path(self.store, job)
+            except UnsafeOutputPath as exc:
+                if delete_output:
+                    raise ValueError(f"为保护本地文件，未删除音频：{exc}") from exc
+                output = None
+            output_existed = bool(output and output.is_file())
+            preserved_path: str | None = None
+            if output_existed and output is not None:
+                if delete_output:
+                    output.unlink()
+                elif self.store.job_dir(job.id) in output.parents:
+                    destination_root = self.store.output_dir()
+                    if destination_root == self.store.job_dir(job.id) or self.store.job_dir(job.id) in destination_root.parents:
+                        destination_root = (self.store.root.parent / "output").resolve()
+                        destination_root.mkdir(parents=True, exist_ok=True)
+                    destination = self._available_output_path(destination_root, output.stem, output.suffix)
+                    shutil.move(str(output), str(destination))
+                    preserved_path = str(destination)
+                else:
+                    preserved_path = str(output)
+            self.store.delete(job_id)
+            self._cancelled.discard(job_id)
+            return {
+                "ok": True,
+                "id": job_id,
+                "recordDeleted": True,
+                "outputDeleted": bool(delete_output and output_existed),
+                "preservedOutputPath": preserved_path,
+            }
 
     def _require(self, job_id: str) -> JobManifest:
         job = self.store.load(job_id)
@@ -238,6 +303,8 @@ class JobManager:
                     success = True
                     break
                 except Exception as exc:
+                    if job.id in self._cancelled:
+                        return self._finish_cancelled(job)
                     last_error = f"{type(exc).__name__}: {exc}"
                     segment.status = SegmentStatus.failed
                     segment.error = last_error
@@ -259,15 +326,18 @@ class JobManager:
             self._emit(job, "segment.completed")
         if job.id in self._cancelled:
             return self._finish_cancelled(job)
-        final_path = self.store.job_dir(job.id) / f"{job.title or job.id}.wav"
+        output_dir = self.store.output_dir()
+        final_path = output_dir / f"{job.title or job.id}.wav"
         invalid = '<>:"/\\|?*'
         safe_name = "".join("_" if char in invalid else char for char in final_path.name)
         final_path = final_path.with_name(safe_name)
+        final_path = self._available_output_path(output_dir, final_path.stem, final_path.suffix)
         merge_wav_files(
             [segment.output_path for segment in job.segments if segment.output_path], final_path,
             sample_rate=job.long_audio.target_sample_rate, silence_ms=job.long_audio.silence_ms,
         )
         job.output_path = str(final_path)
+        job.output_directory = str(output_dir)
         job.status = JobStatus.completed
         job.progress = 1.0
         job.updated_at = now_iso()
@@ -277,6 +347,18 @@ class JobManager:
                 segment.output_path = None
         self.store.save(job)
         self._emit(job, "job.completed")
+
+    @staticmethod
+    def _available_output_path(directory: Path, stem: str, suffix: str) -> Path:
+        candidate = directory / f"{stem}{suffix}"
+        if not candidate.exists():
+            return candidate
+        index = 2
+        while True:
+            candidate = directory / f"{stem} ({index}){suffix}"
+            if not candidate.exists():
+                return candidate
+            index += 1
 
     def _finish_cancelled(self, job: JobManifest) -> None:
         job.status = JobStatus.cancelled

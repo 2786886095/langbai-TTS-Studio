@@ -94,7 +94,7 @@
 
 ## 打开或定位任务输出
 
-`GET /api/jobs/{id}/output` 只解析属于该任务目录的 WAV 文件，阻止被篡改清单指向任意本地文件。成功返回音频元数据以及：
+`GET /api/jobs/{id}/output` 只解析属于该任务目录或任务生成时记录的受控输出目录的 WAV 文件，阻止被篡改清单指向任意本地文件。默认输出位置是软件根目录下的 `output`。成功返回音频元数据以及：
 
 ```json
 {
@@ -144,4 +144,4 @@ IndexTTS2/VoxCPM2 的 `acceptedToolLicenses` 只允许 `uv`；GPT-SoVITS 需要 
 
 ## 既有接口
 
-任务、引擎、SSE 和安装器接口保持不变：`/api/jobs`、`/api/engines`、`/api/events`、`/api/installations`、`/api/downloads`、`/api/installer/*`。
+任务、引擎、SSE 和安装器接口保持不变：`/api/jobs`、`/api/engines`、`/api/events`、`/api/installations`、`/api/downloads`、`/api/installer/*`。`DELETE /api/jobs/{id}?deleteOutput=false` 仅删除记录；传入 `deleteOutput=true` 时同时删除任务生成的 WAV 文件，活动任务必须先取消。

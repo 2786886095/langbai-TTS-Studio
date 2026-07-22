@@ -15,6 +15,8 @@ const DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL || 'http://127.0.0.1:5173
 let mainWindow = null;
 let backendProcess = null;
 let appIsQuitting = false;
+let closeApproved = false;
+let closeCheckInProgress = false;
 let desktopState = {};
 let desktopLogStream = null;
 const audioGrants = new Map();
@@ -161,6 +163,68 @@ function backendIsReady() {
   });
 }
 
+function backendJson(method, requestPath, body = null, timeout = 1800) {
+  return new Promise((resolve, reject) => {
+    const payload = body == null ? null : Buffer.from(JSON.stringify(body), 'utf8');
+    const request = http.request({
+      host: BACKEND_HOST, port: BACKEND_PORT, path: requestPath, method, timeout,
+      headers: payload ? { 'content-type': 'application/json', 'content-length': payload.length } : undefined,
+    }, (response) => {
+      let text = '';
+      response.setEncoding('utf8');
+      response.on('data', (chunk) => { text += chunk; });
+      response.on('end', () => {
+        try {
+          const parsed = text ? JSON.parse(text) : {};
+          if ((response.statusCode || 500) >= 400) reject(new Error(parsed.detail || `HTTP ${response.statusCode}`));
+          else resolve(parsed);
+        } catch (error) { reject(error); }
+      });
+    });
+    request.once('timeout', () => { request.destroy(); reject(new Error('Backend request timed out')); });
+    request.once('error', reject);
+    if (payload) request.write(payload);
+    request.end();
+  });
+}
+
+function activeExitDetail(activity) {
+  const engineNames = { indextts2: 'IndexTTS 2', voxcpm: 'VoxCPM 2', gpt_sovits: 'GPT-SoVITS' };
+  const lines = [];
+  if (activity.engines?.length) lines.push(`运行中的引擎：${activity.engines.map((item) => engineNames[item.id] || item.id).join('、')}`);
+  if (activity.jobs?.length) lines.push(`生成任务：${activity.jobs.length} 个`);
+  if (activity.training?.length) lines.push(`训练任务：${activity.training.length} 个`);
+  return lines.join('\n');
+}
+
+async function confirmActiveWorkTermination(parentWindow) {
+  let activity;
+  try {
+    activity = await backendJson('GET', '/api/runtime/activity');
+  } catch (error) {
+    logDesktop('ERROR', `Unable to inspect active work before exit: ${error.message}`);
+    return true;
+  }
+  if (!activity.active) return true;
+  const result = await dialog.showMessageBox(parentWindow, {
+    type: 'warning',
+    title: '仍有本地任务正在运行',
+    message: '退出将终止正在运行的模型与任务',
+    detail: `${activeExitDetail(activity)}\n\n已完成的音频分段和训练检查点会保留。是否仍要退出？`,
+    buttons: ['返回软件', '终止任务并退出'],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+  });
+  if (result.response !== 1) return false;
+  try {
+    await backendJson('POST', '/api/runtime/terminate-active', null, 3500);
+  } catch (error) {
+    logDesktop('ERROR', `Unable to request graceful task termination: ${error.message}`);
+  }
+  return true;
+}
+
 async function startBackend() {
   if (await backendIsReady()) return;
   if (await portIsOpen(BACKEND_PORT, BACKEND_HOST)) {
@@ -183,6 +247,7 @@ async function startBackend() {
         LANGBAI_PROJECT_ROOT: app.isPackaged ? process.resourcesPath : projectRoot(),
         LANGBAI_TTS_DATA: process.env.LANGBAI_CAPTURE_DATA || path.join(app.getPath('documents'), 'langbai-TTS-Studio', 'data'),
         LANGBAI_INSTALL_ROOT: path.join(app.getPath('documents'), 'langbai-TTS-Studio', 'engines'),
+        LANGBAI_OUTPUT_ROOT: path.join(app.isPackaged ? path.dirname(process.execPath) : projectRoot(), 'output'),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     },
@@ -226,8 +291,13 @@ async function createWindow() {
 
   desktopState = readDesktopState();
   const savedBounds = validWindowBounds(desktopState.bounds);
+  const captureWidth = Number(process.env.LANGBAI_CAPTURE_WIDTH);
+  const captureHeight = Number(process.env.LANGBAI_CAPTURE_HEIGHT);
+  const captureBounds = Number.isFinite(captureWidth) && Number.isFinite(captureHeight)
+    ? { width: Math.max(1180, captureWidth), height: Math.max(720, captureHeight) }
+    : null;
   mainWindow = new BrowserWindow({
-    ...(savedBounds || { width: 1560, height: 960 }),
+    ...(captureBounds || savedBounds || { width: 1560, height: 960 }),
     minWidth: 1180,
     minHeight: 720,
     show: false,
@@ -245,11 +315,21 @@ async function createWindow() {
     },
   });
   if (desktopState.maximized) mainWindow.maximize();
-  mainWindow.on('close', () => {
+  mainWindow.on('close', (event) => {
     if (!mainWindow) return;
     if (!mainWindow.isMaximized() && !mainWindow.isMinimized()) desktopState.bounds = mainWindow.getBounds();
     desktopState.maximized = mainWindow.isMaximized();
     saveDesktopState();
+    if (appIsQuitting || closeApproved) return;
+    event.preventDefault();
+    if (closeCheckInProgress) return;
+    closeCheckInProgress = true;
+    void confirmActiveWorkTermination(mainWindow).then((confirmed) => {
+      closeCheckInProgress = false;
+      if (!confirmed || !mainWindow || mainWindow.isDestroyed()) return;
+      closeApproved = true;
+      mainWindow.close();
+    });
   });
   mainWindow.webContents.on('before-input-event', (event, input) => {
     if (!input.control || input.type !== 'keyDown') return;
@@ -288,7 +368,7 @@ async function createWindow() {
           await mainWindow.webContents.executeJavaScript("document.querySelector('.existing-engine-callout, .runtime-license-list')?.scrollIntoView({ block: 'center' })");
         }
       } else if (captureView) {
-        const labels = { tasks: '任务队列', voices: '角色声音', 'voice-editor': '角色声音', community: 'GPT 模型广场', audio: '音频库', history: '历史记录', studio: '创作台' };
+        const labels = { tasks: '任务队列', voices: '角色声音', 'voice-editor': '角色声音', community: 'GPT 模型广场', training: '模型训练', 'training-gpt': '模型训练', 'training-vox': '模型训练', 'training-vox-monitor': '模型训练', runtime: '运行终端', audio: '音频库', history: '历史记录', studio: '创作台' };
         const label = labels[captureView];
         if (label) {
           await mainWindow.webContents.executeJavaScript(`Array.from(document.querySelectorAll('nav button')).find((button) => button.textContent.includes(${JSON.stringify(label)}))?.click()`);
@@ -304,8 +384,30 @@ async function createWindow() {
             select.dispatchEvent(new Event('change', { bubbles: true }));
           })()`);
         }
+        if (captureView === 'parameters') {
+          await mainWindow.webContents.executeJavaScript("document.querySelector('.parameter-entry')?.click()");
+        }
+        if (captureView === 'update') {
+          sendToRenderer('updates:event', { state: 'available', info: { version: '1.2.0' } });
+        }
+        if (captureView === 'runtime') {
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          await mainWindow.webContents.executeJavaScript("Array.from(document.querySelectorAll('button')).find((button) => button.textContent.includes('打开全部终端'))?.click()");
+        }
+        if (captureView === 'training-gpt') {
+          await new Promise((resolve) => setTimeout(resolve, 900));
+          await mainWindow.webContents.executeJavaScript("Array.from(document.querySelectorAll('button')).find((button) => button.textContent.includes('进入 GPT-SoVITS 训练'))?.click()");
+        }
+        if (captureView === 'training-vox' || captureView === 'training-vox-monitor') {
+          await new Promise((resolve) => setTimeout(resolve, 900));
+          await mainWindow.webContents.executeJavaScript("Array.from(document.querySelectorAll('button')).find((button) => button.textContent.includes('进入 VoxCPM2 训练'))?.click()");
+          if (captureView === 'training-vox-monitor') {
+            await new Promise((resolve) => setTimeout(resolve, 650));
+            await mainWindow.webContents.executeJavaScript("document.querySelector('.training-monitor-entry')?.click()");
+          }
+        }
       }
-      await new Promise((resolve) => setTimeout(resolve, captureView === 'engine-manager' ? 5500 : captureView === 'community' ? 2200 : 800));
+      await new Promise((resolve) => setTimeout(resolve, captureView === 'engine-manager' ? 5500 : ['community', 'runtime', 'training', 'training-gpt', 'training-vox', 'training-vox-monitor'].includes(captureView) ? 2200 : 800));
       const image = await mainWindow.webContents.capturePage();
       fs.writeFileSync(capturePath, image.toPNG());
       stopBackend();
@@ -391,7 +493,13 @@ ipcMain.handle('updates:check', async (_event, requestedChannel = 'stable') => {
 });
 
 ipcMain.handle('updates:download', () => autoUpdater.downloadUpdate());
-ipcMain.handle('updates:install', () => autoUpdater.quitAndInstall(false, true));
+ipcMain.handle('updates:install', async () => {
+  if (!await confirmActiveWorkTermination(mainWindow)) return { installed: false, cancelled: true };
+  closeApproved = true;
+  appIsQuitting = true;
+  autoUpdater.quitAndInstall(false, true);
+  return { installed: true };
+});
 
 ipcMain.handle('app:runtime-info', () => ({
   backendUrl: `http://${BACKEND_HOST}:${BACKEND_PORT}`,
