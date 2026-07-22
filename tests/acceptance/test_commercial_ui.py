@@ -43,6 +43,22 @@ def test_audio_library_has_real_playback(project_root: Path, commercial_release:
     assert "getAudioUrl" in source, "播放器必须通过受控的 Electron 本地音频 URL 读取输出"
 
 
+def test_audio_records_have_explicit_delete_choices_without_horizontal_drag(project_root: Path, commercial_release: bool) -> None:
+    require_commercial_gate(commercial_release)
+    source = (project_root / "frontend" / "src" / "WorkspacePages.tsx").read_text(encoding="utf-8")
+    styles = (project_root / "frontend" / "src" / "styles.css").read_text(encoding="utf-8")
+    assert "deleteOutput=" in source and "仅删除记录" in source and "记录和音频一起删除" in source, "删除任务必须让用户明确选择是否保留音频"
+    assert "overflow-x: hidden" in styles, "记录列表不得要求用户左右拖动"
+    assert "grid-template-areas" in styles and "flex-wrap: wrap" in styles, "窄窗口必须重排信息和操作按钮，而不是截断或挤出视口"
+
+
+def test_task_title_defaults_to_text_content(project_root: Path, commercial_release: bool) -> None:
+    require_commercial_gate(commercial_release)
+    source = (project_root / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")
+    assert "titleFromText" in source and "effectiveProjectName" in source, "任务名称必须从正文开头自动生成"
+    assert 'title: projectName.trim() || "未命名语音项目"' not in source, "提交任务时不得继续使用固定未命名占位符"
+
+
 def test_completed_job_has_playback_and_reveal_actions(project_root: Path, commercial_release: bool) -> None:
     require_commercial_gate(commercial_release)
     source = (project_root / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")

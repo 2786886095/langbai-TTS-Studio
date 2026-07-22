@@ -16,6 +16,7 @@ backend/.supply-audit/
 *.log
 .env
 outputs/
+/output/
 backend/data/
 runtime-smoke/
 docs/audit/

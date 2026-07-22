@@ -45,6 +45,14 @@ const initialJobs: Job[] = [];
 const apiBase = new URLSearchParams(window.location.search).get("backendUrl") ?? "";
 const apiUrl = (path: string) => `${apiBase}${path}`;
 const parameterPresetStorageKey = "langbai-parameter-presets-v1";
+const initialText = "声音不只是信息的载体，它也承载情绪、节奏与想象。\n\n在 langbai TTS Studio 中，你可以为每个任务选择最适合的本地语音引擎，细致调整音色与表达，并将长篇文本稳定地转换成完整音频。";
+
+function titleFromText(value: string, limit = 36) {
+  const collapsed = value.replace(/\s+/g, " ").trim().replace(/^[，。！？、；：,.!?;:\-—_\s]+/, "");
+  if (!collapsed) return "语音项目";
+  const sentence = collapsed.split(/[。！？!?\n]/, 1)[0]?.trim() || collapsed;
+  return sentence.slice(0, limit).replace(/[，。！？、；：,.!?;:\s\-—_]+$/, "") || "语音项目";
+}
 
 function loadParameterPresets(): ParameterPreset[] {
   try {
@@ -181,7 +189,7 @@ function toApiParams(engine: EngineId, values: Record<string, unknown>) {
 export function App() {
   const [engine, setEngine] = useState<EngineId>("indextts2");
   const [params, setParams] = useState<Record<EngineId, Record<string, unknown>>>(() => ({ indextts2: defaultsFor("indextts2"), voxcpm: defaultsFor("voxcpm"), gpt_sovits: defaultsFor("gpt_sovits") }));
-  const [text, setText] = useState("声音不只是信息的载体，它也承载情绪、节奏与想象。\n\n在 langbai TTS Studio 中，你可以为每个任务选择最适合的本地语音引擎，细致调整音色与表达，并将长篇文本稳定地转换成完整音频。");
+  const [text, setText] = useState(initialText);
   const [groupsOpen, setGroupsOpen] = useState<Record<string, boolean>>({ "音色与情感": true, "音色模式": true, "角色模型与参考": true });
   const [jobs, setJobs] = useState<Job[]>(initialJobs);
   const [engineStatus, setEngineStatus] = useState<Record<EngineId, boolean | null>>({ indextts2: null, voxcpm: null, gpt_sovits: null });
@@ -195,7 +203,7 @@ export function App() {
   const [density, setDensity] = useState<"comfortable" | "compact">(() => localStorage.getItem("langbai-density") === "compact" ? "compact" : "comfortable");
   const [showOnboarding, setShowOnboarding] = useState(() => localStorage.getItem("langbai-onboarding-complete") !== "1");
   const [projectId, setProjectId] = useState<string | null>(null);
-  const [projectName, setProjectName] = useState("未命名语音项目");
+  const [projectName, setProjectName] = useState(() => titleFromText(initialText));
   const [projectDescription, setProjectDescription] = useState("");
   const [projectLibraryOpen, setProjectLibraryOpen] = useState(false);
   const [confirmNewProject, setConfirmNewProject] = useState(false);
@@ -220,6 +228,12 @@ export function App() {
   const currentParams = params[engine];
   const activeGeneration = useMemo(() => jobs.find(job => job.status === "running") ?? jobs.find(job => job.status === "queued") ?? null, [jobs]);
   const sentenceCount = useMemo(() => text.split(/[。！？\n]+/).filter(Boolean).length, [text]);
+  const effectiveProjectName = projectName.trim() && !["未命名语音项目", "未命名语音任务"].includes(projectName.trim()) ? projectName.trim() : titleFromText(text);
+  const updateProjectText = (nextText: string) => {
+    const previousAutoTitle = titleFromText(text);
+    setText(nextText);
+    if (!projectName.trim() || projectName === previousAutoTitle || ["未命名语音项目", "未命名语音任务"].includes(projectName.trim())) setProjectName(titleFromText(nextText));
+  };
   const visibleGroups = useMemo(() => parameterGroups[engine].map(group => ({ ...group, fields: group.fields.filter(field => !search || `${field.label}${field.help}${field.key}`.toLowerCase().includes(search.toLowerCase())) })).filter(group => !search || group.fields.length), [engine, search]);
   const currentVoiceProfiles = useMemo(() => voiceProfiles.filter(profile => profile.engine === engine), [voiceProfiles, engine]);
   const currentParameterPresets = useMemo(() => parameterPresets.filter(preset => preset.engine === engine).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)), [parameterPresets, engine]);
@@ -483,7 +497,7 @@ export function App() {
     try {
       const sampleRate = Number(String(currentParams.sample_rate ?? "44100").replace(/\D/g, "")) || 44100;
       const longAudio = { maxChars: Number(currentParams.segment_chars ?? 180), maxRetries: Number(currentParams.retry_count ?? 2), keepSegments: Boolean(currentParams.keep_segments), targetSampleRate: sampleRate, silenceMs: Number(currentParams.segment_pause ?? 280) };
-      const response = await fetch(apiUrl("/api/jobs"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: projectName.trim() || "未命名语音项目", engine, text, params: toApiParams(engine, currentParams), longAudio }) });
+      const response = await fetch(apiUrl("/api/jobs"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: effectiveProjectName, engine, text, params: toApiParams(engine, currentParams), longAudio }) });
       reachedBackend = true;
       if (!response.ok) {
         const details = await response.json().catch(() => null) as { detail?: string } | null;
@@ -515,7 +529,7 @@ export function App() {
   const saveProject = async () => {
     if (savingProject) return;
     const sampleRate = Number(String(currentParams.sample_rate ?? "44100").replace(/\D/g, "")) || 44100;
-    const payload = { name: projectName.trim() || "未命名语音项目", description: projectDescription, engine, text, params: currentParams, longAudio: { maxChars: Number(currentParams.segment_chars ?? 180), maxRetries: Number(currentParams.retry_count ?? 2), keepSegments: Boolean(currentParams.keep_segments), targetSampleRate: sampleRate, silenceMs: Number(currentParams.segment_pause ?? 280) } };
+    const payload = { name: effectiveProjectName, description: projectDescription, engine, text, params: currentParams, longAudio: { maxChars: Number(currentParams.segment_chars ?? 180), maxRetries: Number(currentParams.retry_count ?? 2), keepSegments: Boolean(currentParams.keep_segments), targetSampleRate: sampleRate, silenceMs: Number(currentParams.segment_pause ?? 280) } };
     setSavingProject(true);
     try {
       const response = await fetch(apiUrl(projectId ? `/api/projects/${projectId}` : "/api/projects"), { method: projectId ? "PUT" : "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
@@ -533,7 +547,7 @@ export function App() {
   };
   const clearProject = (message = "已创建空白项目。") => {
     setProjectId(null);
-    setProjectName("未命名语音项目");
+    setProjectName("");
     setProjectDescription("");
     setText("");
     setParams({ indextts2: defaultsFor("indextts2"), voxcpm: defaultsFor("voxcpm"), gpt_sovits: defaultsFor("gpt_sovits") });
@@ -552,7 +566,7 @@ export function App() {
     if (!project.id || !isEngineId(project.engine) || !project.params || typeof project.params !== "object") throw new Error("项目数据不完整，无法安全恢复。");
     const restored = fromProjectParams(project.engine, project.params, project.longAudio && typeof project.longAudio === "object" ? project.longAudio : {});
     setProjectId(project.id);
-    setProjectName(project.name || "未命名语音项目");
+    setProjectName(project.name && !["未命名语音项目", "未命名语音任务"].includes(project.name) ? project.name : titleFromText(project.text ?? ""));
     setProjectDescription(project.description ?? "");
     setText(project.text ?? "");
     setEngine(project.engine);
@@ -566,7 +580,7 @@ export function App() {
     setProjectLibraryOpen(false);
     setNotice(`已打开项目“${project.name}”，正文、引擎和参数均已恢复。`);
   };
-  const importText = async () => { const result = await window.langbaiDesktop?.readTextFile?.(); if (!result) return; const content = typeof result === "string" ? result : result.content ?? result.text ?? ""; if (content) { setText(content); setNotice("文本已导入。"); } };
+  const importText = async () => { const result = await window.langbaiDesktop?.readTextFile?.(); if (!result) return; const content = typeof result === "string" ? result : result.content ?? result.text ?? ""; if (content) { updateProjectText(content); setNotice("文本已导入。"); } };
   useEffect(() => { const unsubscribe = window.langbaiDesktop?.onCommand?.(command => { if (command === "save-project") void saveProject(); else if (command === "new-project") requestNewProject(); else if (command === "open-settings") setActiveNav("settings"); else if (command === "generate") void submit(); }); return () => { if (typeof unsubscribe === "function") unsubscribe(); }; });
 
   const changeDensity = () => setDensity(current => { const next = current === "comfortable" ? "compact" : "comfortable"; localStorage.setItem("langbai-density", next); return next; });
@@ -591,7 +605,7 @@ export function App() {
       {notice && <div className={`notice ${/(请|失败|尚未|未提交|无法|缺少|必须|拒绝)/.test(notice) ? "warning" : "success"}`}><AlertCircle size={16} /><span>{notice}</span><button onClick={() => setNotice("")}><X size={15} /></button></div>}
 
       <div className="studio-grid">
-        <section className="editor-panel"><div className="panel-heading"><div className="section-label compact"><span>02</span><div><strong>输入内容</strong><small>自动识别段落与标点</small></div></div><div className="editor-actions"><button onClick={importText}><Upload size={15} />导入 TXT</button><button onClick={async () => { const clip = await navigator.clipboard.readText(); if (clip) setText(clip); }}><FileText size={15} />粘贴纯文本</button><button className="parameter-entry" onClick={() => openParameterGroup()}><SlidersHorizontal size={16} />推理参数<span>{parameterGroups[engine].reduce((total, group) => total + group.fields.length, 0)}</span></button></div></div><div className="document-title"><input aria-label="任务名称" value={projectName} onChange={event => setProjectName(event.target.value)} /><span>{projectId ? "已保存项目" : "未保存"}</span></div><textarea className="script-editor" aria-label="要生成的文本" value={text} onChange={e => setText(e.target.value)} placeholder="输入或粘贴需要生成的长文本…" /><div className="editor-footer"><div><span>{text.replace(/\s/g, "").length} 字</span><span>{sentenceCount} 个句段</span><span>预计 {Math.max(1, Math.ceil(text.length / 250))} 分钟</span></div></div><div className="segment-preview"><div><span className="preview-icon"><FileAudio size={17} /></span><div><strong>长音频分段预览 · 无软件时长上限</strong><p>约 {Math.max(1, Math.ceil(text.length / Number(currentParams.segment_chars ?? 180)))} 段 · 分段落盘 · 断点续作 · 流式合并（受本机磁盘与模型稳定性限制）</p></div></div><button onClick={() => openParameterGroup("长音频与输出")}>调整设置<ChevronRight size={14} /></button></div></section>
+        <section className="editor-panel"><div className="panel-heading"><div className="section-label compact"><span>02</span><div><strong>输入内容</strong><small>自动识别段落与标点</small></div></div><div className="editor-actions"><button onClick={importText}><Upload size={15} />导入 TXT</button><button onClick={async () => { const clip = await navigator.clipboard.readText(); if (clip) updateProjectText(clip); }}><FileText size={15} />粘贴纯文本</button><button className="parameter-entry" onClick={() => openParameterGroup()}><SlidersHorizontal size={16} />推理参数<span>{parameterGroups[engine].reduce((total, group) => total + group.fields.length, 0)}</span></button></div></div><div className="document-title"><input aria-label="任务名称" value={projectName} onChange={event => setProjectName(event.target.value)} placeholder={titleFromText(text)} /><span>{projectId ? "已保存项目" : "未保存"}</span></div><textarea className="script-editor" aria-label="要生成的文本" value={text} onChange={e => updateProjectText(e.target.value)} placeholder="输入或粘贴需要生成的长文本…" /><div className="editor-footer"><div><span>{text.replace(/\s/g, "").length} 字</span><span>{sentenceCount} 个句段</span><span>预计 {Math.max(1, Math.ceil(text.length / 250))} 分钟</span></div></div><div className="segment-preview"><div><span className="preview-icon"><FileAudio size={17} /></span><div><strong>长音频分段预览 · 无软件时长上限</strong><p>约 {Math.max(1, Math.ceil(text.length / Number(currentParams.segment_chars ?? 180)))} 段 · 分段落盘 · 断点续作 · 流式合并（受本机磁盘与模型稳定性限制）</p></div></div><button onClick={() => openParameterGroup("长音频与输出")}>调整设置<ChevronRight size={14} /></button></div></section>
       </div>
 
       <div className={`parameter-drawer-layer ${parameterDrawerOpen ? "is-open" : ""}`} aria-hidden={!parameterDrawerOpen}><button className="parameter-scrim" aria-label="关闭推理参数" onClick={() => setParameterDrawerOpen(false)} /><aside className="parameter-panel parameter-drawer" role="dialog" aria-modal="true" aria-labelledby="parameter-drawer-title"><div className="parameter-drawer-head"><div><p className="eyebrow">{engines[engine].name}</p><h2 id="parameter-drawer-title">推理参数</h2><span>{parameterGroups[engine].reduce((total, group) => total + group.fields.length, 0)} 项设置 · 修改立即保存到当前方案</span></div><button className="icon-button" aria-label="关闭推理参数" onClick={() => setParameterDrawerOpen(false)}><X size={18} /></button></div><div className="parameter-drawer-tools"><div className="parameter-preset-bar"><label><span>参数预设</span><select value={selectedParameterPreset[engine]} onChange={event => applyParameterPreset(event.target.value)}><option value="">当前临时参数</option>{currentParameterPresets.map(preset => <option key={preset.id} value={preset.id}>{preset.name}</option>)}</select></label><button className="secondary-button" onClick={saveParameterPreset}><Save size={15} />{selectedParameterPreset[engine] ? "更新预设" : "保存为预设"}</button>{selectedParameterPreset[engine] && <button className="secondary-button preset-delete" onClick={deleteParameterPreset}><X size={15} />删除</button>}</div><label className="parameter-search"><Search size={15} /><input value={search} onChange={e => setSearch(e.target.value)} placeholder="搜索参数名称或用途" />{search && <button onClick={() => setSearch("")}><X size={14} /></button>}</label><div className="parameter-jump-list">{parameterGroups[engine].map((group, index) => <button key={group.title} onClick={() => { setGroupsOpen(prev => ({ ...prev, [group.title]: true })); document.getElementById(`parameter-group-${index}`)?.scrollIntoView({ block: "start", behavior: "smooth" }); }}>{group.title}<span>{group.fields.length}</span></button>)}</div></div><div className="parameter-scroll">{visibleGroups.map(group => { const index = parameterGroups[engine].findIndex(item => item.title === group.title); return <section className="parameter-group" id={`parameter-group-${index}`} key={group.title}><button className="group-trigger" onClick={() => setGroupsOpen(prev => ({ ...prev, [group.title]: !prev[group.title] }))}><div><strong>{group.title}</strong><span>{group.fields.length} 项 · {group.summary}</span></div>{groupsOpen[group.title] || search ? <ChevronDown size={17} /> : <ChevronRight size={17} />}</button>{(groupsOpen[group.title] || search) && <div className="group-fields">{group.fields.map(field => <FieldControl key={field.key} field={field} value={currentParams[field.key]} onChange={value => setParams(prev => { const next = { ...prev[engine], [field.key]: value }; return { ...prev, [engine]: engine === "gpt_sovits" ? applyGptSovitsVersionTransition(prev[engine], next) : next }; })} />)}</div>}</section>; })}</div><div className="parameter-footer drawer-footer"><div><Info size={14} /><span>每项均附中文用途与调试说明</span></div><span><button className="secondary-button" onClick={() => setParams(prev => ({ ...prev, [engine]: defaultsFor(engine, prev[engine]) }))}><RotateCcw size={15} />恢复当前版本默认</button><button className="secondary-button" onClick={() => setParameterDrawerOpen(false)}>完成设置</button><button className="primary-button" onClick={submit} disabled={generating}><Zap size={16} />生成音频</button></span></div></aside></div>

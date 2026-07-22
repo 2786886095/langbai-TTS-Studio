@@ -78,6 +78,8 @@ class JobManifest(BaseModel):
     long_audio: LongAudioOptions
     segments: list[SegmentManifest]
     output_path: str | None = None
+    output_directory: str | None = None
+    session_id: str | None = None
     error: str | None = None
     created_at: str = Field(default_factory=now_iso)
     updated_at: str = Field(default_factory=now_iso)

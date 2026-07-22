@@ -247,6 +247,7 @@ async function startBackend() {
         LANGBAI_PROJECT_ROOT: app.isPackaged ? process.resourcesPath : projectRoot(),
         LANGBAI_TTS_DATA: process.env.LANGBAI_CAPTURE_DATA || path.join(app.getPath('documents'), 'langbai-TTS-Studio', 'data'),
         LANGBAI_INSTALL_ROOT: path.join(app.getPath('documents'), 'langbai-TTS-Studio', 'engines'),
+        LANGBAI_OUTPUT_ROOT: path.join(app.isPackaged ? path.dirname(process.execPath) : projectRoot(), 'output'),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     },

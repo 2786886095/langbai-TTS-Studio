@@ -21,6 +21,19 @@ def wait_terminal(manager: JobManager, job_id: str, timeout=5):
     raise AssertionError("job did not finish")
 
 
+def test_gpt_version_marker_is_accepted_in_production_parameter_validation(tmp_path):
+    manager = JobManager(
+        JobStore(tmp_path / "jobs"),
+        {"gpt_sovits": MockAdapter("gpt_sovits")},
+        mock_mode=False,
+    )
+    validated = manager._validate_parameters("gpt_sovits", {
+        "reference_audio": str(tmp_path / "reference.wav"),
+        "sample_steps_auto": True,
+    })
+    assert validated["sample_steps_auto"] is True
+
+
 def test_long_job_retries_once_merges_and_persists(tmp_path):
     adapter = MockAdapter("indextts2")
     manager = JobManager(JobStore(tmp_path / "jobs"), {"indextts2": adapter}, mock_mode=True)

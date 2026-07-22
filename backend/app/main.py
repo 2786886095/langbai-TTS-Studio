@@ -74,7 +74,12 @@ def create_app(*, adapters=None, data_dir: str | Path | None = None, mock_mode: 
                installer_manager: InstallerManager | None = None) -> FastAPI:
     if mock_mode is None:
         mock_mode = os.getenv("LANGBAI_TTS_MOCK", "0") == "1"
-    root = Path(data_dir or os.getenv("LANGBAI_TTS_DATA", BACKEND_ROOT / "data"))
+    explicit_data_dir = data_dir is not None or bool(os.getenv("LANGBAI_TTS_DATA"))
+    root = Path(data_dir or os.getenv("LANGBAI_TTS_DATA", BACKEND_ROOT / "data")).resolve()
+    default_output_root = Path(
+        os.getenv("LANGBAI_OUTPUT_ROOT")
+        or ((root / "output") if explicit_data_dir else (BACKEND_ROOT.parent / "output"))
+    ).resolve()
     managed_install_root = Path(os.getenv("LANGBAI_INSTALL_ROOT") or (root / "managed")).resolve()
     bindings = EngineBindingStore(root / "engine-bindings.json")
     if adapters is None:
@@ -82,14 +87,18 @@ def create_app(*, adapters=None, data_dir: str | Path | None = None, mock_mode: 
             adapters = {engine_id: MockAdapter(engine_id) for engine_id in ENGINE_INFO}
         else:
             adapters = build_default_adapters(root / "logs", managed_install_root, bindings)
-    manager = JobManager(JobStore(root / "jobs"), adapters, mock_mode=mock_mode)
+    settings_store = SettingsStore(root / "settings.json", default_output_directory=default_output_root)
+    manager = JobManager(
+        JobStore(root / "jobs", output_directory=lambda: settings_store.get().output_directory or default_output_root),
+        adapters,
+        mock_mode=mock_mode,
+    )
     installer = installer_manager or InstallerManager(
         root, default_install_root=managed_install_root
     )
     projects = ProjectStore(root / "projects")
     voices = VoiceProfileStore(root / "voice-profiles")
     community_models = CommunityModelManager(root / "community-models")
-    settings_store = SettingsStore(root / "settings.json")
     diagnostics = DiagnosticExporter(root / "diagnostics", root / "logs")
     training = TrainingManager(
         root / "training", adapters, BACKEND_ROOT / "training_worker.py", mock_mode=mock_mode,
@@ -311,6 +320,15 @@ def create_app(*, adapters=None, data_dir: str | Path | None = None, mock_mode: 
     def retry_job(job_id: str):
         try:
             return _job_payload(manager.retry(job_id))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="任务不存在") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @api.delete("/api/jobs/{job_id}")
+    def delete_job(job_id: str, delete_output: bool = Query(default=False, alias="deleteOutput")):
+        try:
+            return manager.delete(job_id, delete_output=delete_output)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="任务不存在") from exc
         except ValueError as exc:
