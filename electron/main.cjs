@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, shell, protocol, net: electronNet, screen } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, Menu, shell, protocol, net: electronNet, screen } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const { spawn, spawnSync } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
@@ -349,6 +349,21 @@ async function createWindow() {
     if (['+', '=', '-', '0'].includes(key)) {
       event.preventDefault();
     }
+  });
+  mainWindow.webContents.on('context-menu', (_event, params) => {
+    if (!params.isEditable || !mainWindow || mainWindow.isDestroyed()) return;
+    const flags = params.editFlags || {};
+    Menu.buildFromTemplate([
+      { label: '撤销', role: 'undo', enabled: Boolean(flags.canUndo) },
+      { label: '重做', role: 'redo', enabled: Boolean(flags.canRedo) },
+      { type: 'separator' },
+      { label: '剪切', role: 'cut', enabled: Boolean(flags.canCut) },
+      { label: '复制', role: 'copy', enabled: Boolean(flags.canCopy) },
+      { label: '粘贴', role: 'paste', enabled: Boolean(flags.canPaste) },
+      { label: '删除', role: 'delete', enabled: Boolean(flags.canDelete) },
+      { type: 'separator' },
+      { label: '全选', role: 'selectAll' },
+    ]).popup({ window: mainWindow });
   });
 
   mainWindow.once('ready-to-show', async () => {

@@ -8,7 +8,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .models import LongAudioOptions, now_iso
 from .parameters import ENGINE_INFO
@@ -65,8 +65,10 @@ class ProjectCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=2000)
     engine: str
+    mode: Literal["single", "multi_speaker"] = "single"
     text: str = ""
     parameters: dict[str, Any] = Field(default_factory=dict, alias="params")
+    multi_speaker: dict[str, Any] | None = Field(default=None, alias="multiSpeaker")
     long_audio: LongAudioOptions = Field(default_factory=LongAudioOptions, alias="longAudio")
 
     @field_validator("engine")
@@ -83,8 +85,10 @@ class ProjectUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=2000)
     engine: str | None = None
+    mode: Literal["single", "multi_speaker"] | None = None
     text: str | None = None
     parameters: dict[str, Any] | None = Field(default=None, alias="params")
+    multi_speaker: dict[str, Any] | None = Field(default=None, alias="multiSpeaker")
     long_audio: LongAudioOptions | None = Field(default=None, alias="longAudio")
 
     @field_validator("engine")
@@ -108,8 +112,10 @@ class Project(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=2000)
     engine: str
+    mode: Literal["single", "multi_speaker"] = "single"
     text: str = ""
     parameters: dict[str, Any] = Field(default_factory=dict, alias="params")
+    multi_speaker: dict[str, Any] | None = Field(default=None, alias="multiSpeaker")
     long_audio: LongAudioOptions = Field(default_factory=LongAudioOptions, alias="longAudio")
     source_project_id: str | None = Field(default=None, alias="sourceProjectId")
     created_at: str = Field(default_factory=now_iso, alias="createdAt")
@@ -128,6 +134,12 @@ class Project(BaseModel):
         if value not in ENGINE_INFO:
             raise ValueError(f"不支持的引擎: {value}")
         return value
+
+    @model_validator(mode="after")
+    def multi_speaker_requires_gpt_sovits(self):
+        if self.mode == "multi_speaker" and self.engine != "gpt_sovits":
+            raise ValueError("多人配音项目当前只支持 GPT-SoVITS")
+        return self
 
 
 class ProjectStore:
@@ -182,8 +194,10 @@ class ProjectStore:
                 name=request.name,
                 description=request.description,
                 engine=request.engine,
+                mode=request.mode,
                 text=request.text,
                 params=request.parameters,
+                multiSpeaker=request.multi_speaker,
                 longAudio=request.long_audio,
                 sourceProjectId=source_project_id,
             )
@@ -206,7 +220,7 @@ class ProjectStore:
         with self._lock:
             current = self.get(project_id)
             changes = request.model_dump(exclude_unset=True, by_alias=False)
-            changes = {key: value for key, value in changes.items() if value is not None}
+            changes = {key: value for key, value in changes.items() if value is not None or key == "multi_speaker"}
             updated = current.model_copy(update={**changes, "updated_at": now_iso()})
             updated = Project.model_validate(updated.model_dump())
             atomic_write_json(self._path(project_id), updated.model_dump(mode="json", by_alias=True))
@@ -218,8 +232,10 @@ class ProjectStore:
             name=request.name or f"{current.name} - 副本",
             description=current.description,
             engine=current.engine,
+            mode=current.mode,
             text=current.text,
             params=current.parameters,
+            multiSpeaker=current.multi_speaker,
             longAudio=current.long_audio,
         ), source_project_id=current.id)
 

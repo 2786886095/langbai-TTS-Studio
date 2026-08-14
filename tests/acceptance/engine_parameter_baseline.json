@@ -122,7 +122,7 @@
         {"name":"prompt_lang","native_name":"prompt_language","type":"enum","required":true,"default":"auto","category":"input","label_zh":"参考文本语言","help_zh":"指定参考音频对应文本的语言，必须是当前模型版本支持的选项。"},
         {"name":"prompt_text","type":"string","required":false,"default":"","category":"input","label_zh":"参考音频文本","help_zh":"填写参考音频实际说出的文字，可提高音色克隆和韵律条件的准确性。"},
         {"name":"top_k","type":"integer","required":false,"default":15,"category":"generation","label_zh":"候选数量","help_zh":"限制语义 token 采样候选数，较小更稳定，较大可能增加多样性。"},
-        {"name":"top_p","type":"number","required":false,"default":1.0,"category":"generation","label_zh":"核采样概率","help_zh":"按累计概率筛选语义 token 候选，降低通常会使生成更保守。"},
+        {"name":"top_p","type":"number","required":false,"default":0.7,"category":"generation","label_zh":"核采样概率","help_zh":"按累计概率筛选语义 token 候选，降低通常会使生成更保守。"},
         {"name":"temperature","type":"number","required":false,"default":1.0,"category":"generation","label_zh":"采样温度","help_zh":"调节语义采样随机性，提高会更活跃但也更容易出现不稳定结果。"},
         {"name":"text_split_method","type":"enum","required":false,"default":"cut5","category":"generation","label_zh":"原生文本切分方法","help_zh":"选择 GPT-SoVITS 内部文本切分策略，外层已分段时要避免重复改变边界。"},
         {"name":"batch_size","type":"integer","required":false,"default":1,"category":"generation","label_zh":"推理批大小","help_zh":"并行处理的文本片段数量，增大会占用更多显存并可能提高吞吐。"},

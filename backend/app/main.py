@@ -25,7 +25,8 @@ from .installer import InstallerManager, InstallRequest, ModelInstallRequest, To
 from .installer.manager import InstallConflictError
 from .diagnostics import DiagnosticExporter, DiagnosticNotFound
 from .library import output_state, search_jobs
-from .models import JobCreate
+from .models import JobCreate, MultiSpeakerJobCreate, MultiSpeakerParseRequest
+from .multi_speaker import parse_multi_speaker_script
 from .model_scanner import scan_gpt_sovits_models
 from .parameters import ENGINE_INFO, ENGINE_PARAMETERS, engine_catalog
 from .storage import JobStore
@@ -88,16 +89,17 @@ def create_app(*, adapters=None, data_dir: str | Path | None = None, mock_mode: 
         else:
             adapters = build_default_adapters(root / "logs", managed_install_root, bindings)
     settings_store = SettingsStore(root / "settings.json", default_output_directory=default_output_root)
+    voices = VoiceProfileStore(root / "voice-profiles")
     manager = JobManager(
         JobStore(root / "jobs", output_directory=lambda: settings_store.get().output_directory or default_output_root),
         adapters,
         mock_mode=mock_mode,
+        voice_store=voices,
     )
     installer = installer_manager or InstallerManager(
         root, default_install_root=managed_install_root
     )
     projects = ProjectStore(root / "projects")
-    voices = VoiceProfileStore(root / "voice-profiles")
     community_models = CommunityModelManager(root / "community-models")
     diagnostics = DiagnosticExporter(root / "diagnostics", root / "logs")
     training = TrainingManager(
@@ -116,7 +118,7 @@ def create_app(*, adapters=None, data_dir: str | Path | None = None, mock_mode: 
             manager.close()
             installer.close()
 
-    api = FastAPI(title="langbai TTS Studio API", version="1.2.5", lifespan=lifespan)
+    api = FastAPI(title="langbai TTS Studio API", version="1.2.7", lifespan=lifespan)
     api.state.manager = manager
     api.state.installer = installer
     api.state.projects = projects
@@ -299,6 +301,24 @@ def create_app(*, adapters=None, data_dir: str | Path | None = None, mock_mode: 
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    @api.post("/api/multi-speaker/parse")
+    def parse_multi_speaker(request: MultiSpeakerParseRequest):
+        lines, invalid_lines = parse_multi_speaker_script(request.script)
+        speakers = list(dict.fromkeys(line.speaker for line in lines))
+        return {
+            "lines": [line.model_dump(mode="json", by_alias=True) for line in lines],
+            "speakers": speakers,
+            "invalidLines": invalid_lines,
+            "valid": bool(lines) and not invalid_lines,
+        }
+
+    @api.post("/api/jobs/multi-speaker", status_code=status.HTTP_202_ACCEPTED)
+    def create_multi_speaker_job(request: MultiSpeakerJobCreate):
+        try:
+            return _job_payload(manager.create_multi_speaker(request))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @api.get("/api/jobs/{job_id}")
     def get_job(job_id: str):
         try:
@@ -371,7 +391,7 @@ def create_app(*, adapters=None, data_dir: str | Path | None = None, mock_mode: 
     def create_project(request: ProjectCreate):
         try:
             return projects.create(request).model_dump(mode="json", by_alias=True)
-        except WorkspaceError as exc:
+        except (ValueError, WorkspaceError) as exc:
             workspace_error(exc)
 
     @api.get("/api/projects/{project_id}")

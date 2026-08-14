@@ -4,6 +4,7 @@ import {
   FolderOpen, LoaderCircle, Plus, RefreshCw, Search, Trash2, X,
 } from "lucide-react";
 import { engines, type EngineId } from "./parameterSchemas";
+import type { CreationMode, MultiSpeakerProjectSettings } from "./multiSpeaker";
 
 export type ProjectRecord = {
   schemaVersion?: number;
@@ -11,9 +12,11 @@ export type ProjectRecord = {
   name: string;
   description?: string;
   engine: EngineId;
+  mode?: CreationMode;
   text: string;
   params: Record<string, unknown>;
   longAudio: Record<string, unknown>;
+  multiSpeaker?: MultiSpeakerProjectSettings | null;
   sourceProjectId?: string | null;
   createdAt?: string;
   updatedAt?: string;

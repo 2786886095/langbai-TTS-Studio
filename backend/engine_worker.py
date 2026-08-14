@@ -183,7 +183,7 @@ def gpt_sovits_synthesize(text: str, output: Path, p: dict) -> None:
         "text": text, "text_lang": p.get("text_language", "auto"),
         "ref_audio_path": p.get("reference_audio"), "aux_ref_audio_paths": p.get("aux_reference_audios") or [],
         "prompt_text": p.get("prompt_text", ""), "prompt_lang": p.get("prompt_language", "auto"),
-        "top_k": int(p.get("top_k", 15)), "top_p": float(p.get("top_p", 1.0)),
+        "top_k": int(p.get("top_k", 15)), "top_p": float(p.get("top_p", 0.7)),
         "temperature": float(p.get("temperature", 1.0)), "text_split_method": p.get("text_split_method", "cut5"),
         "batch_size": int(p.get("batch_size", 1)), "batch_threshold": float(p.get("batch_threshold", 0.75)),
         "split_bucket": bool(p.get("split_bucket", True)), "speed_factor": float(p.get("speed_factor", 1.0)),

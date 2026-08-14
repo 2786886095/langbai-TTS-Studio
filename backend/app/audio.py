@@ -1,10 +1,23 @@
 from __future__ import annotations
 
 from pathlib import Path
+from collections.abc import Sequence
+
+
+def _gap_milliseconds(count: int, silence_ms: int | Sequence[int]) -> list[int]:
+    gap_count = max(0, count - 1)
+    if isinstance(silence_ms, int):
+        if silence_ms < 0:
+            raise ValueError("silence_ms must be non-negative")
+        return [silence_ms] * gap_count
+    gaps = [int(value) for value in silence_ms]
+    if len(gaps) != gap_count or any(value < 0 for value in gaps):
+        raise ValueError("silence_ms sequence must contain one non-negative value per audio gap")
+    return gaps
 
 
 def merge_wav_files(inputs: list[str | Path], output: str | Path, *, sample_rate: int,
-                    silence_ms: int = 0) -> Path:
+                    silence_ms: int | Sequence[int] = 0) -> Path:
     """Stream, mono-mix, resample and concatenate WAV files as PCM-16.
 
     The output is written segment-by-segment instead of collecting the complete
@@ -21,19 +34,19 @@ def merge_wav_files(inputs: list[str | Path], output: str | Path, *, sample_rate
 
     output_path = Path(output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    silence_frames = round(sample_rate * silence_ms / 1000)
-    estimated_frames = silence_frames * max(0, len(inputs) - 1)
+    gap_frames = [round(sample_rate * value / 1000) for value in _gap_milliseconds(len(inputs), silence_ms)]
+    estimated_frames = sum(gap_frames)
     for item in inputs:
         info = sf.info(str(item))
         estimated_frames += round(info.frames * sample_rate / info.samplerate)
     estimated_pcm_bytes = estimated_frames * 2  # mono PCM-16
     container = "RF64" if estimated_pcm_bytes >= 0xFFFF0000 else "WAV"
-    silence = np.zeros(min(silence_frames, sample_rate), dtype=np.float32)
+    silence = np.zeros(min(max(gap_frames, default=0), sample_rate), dtype=np.float32)
     with sf.SoundFile(str(output_path), mode="w", samplerate=sample_rate, channels=1,
                       subtype="PCM_16", format=container) as destination:
         for index, item in enumerate(inputs):
-            if index and silence_frames:
-                remaining = silence_frames
+            if index and gap_frames[index - 1]:
+                remaining = gap_frames[index - 1]
                 while remaining:
                     block = silence[:min(remaining, len(silence))]
                     destination.write(block)
@@ -50,12 +63,12 @@ def merge_wav_files(inputs: list[str | Path], output: str | Path, *, sample_rate
 
 
 def _merge_pcm_wav_stdlib(inputs: list[str | Path], output: str | Path, *, sample_rate: int,
-                          silence_ms: int) -> Path:
+                          silence_ms: int | Sequence[int]) -> Path:
     """Dependency-free PCM fallback used by bootstrap and contract tests on Python <=3.12."""
     import audioop
     import wave
 
-    silence = b"\x00\x00" * round(sample_rate * silence_ms / 1000)
+    gaps = [b"\x00\x00" * round(sample_rate * value / 1000) for value in _gap_milliseconds(len(inputs), silence_ms)]
     output_path = Path(output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with wave.open(str(output_path), "wb") as destination:
@@ -63,8 +76,8 @@ def _merge_pcm_wav_stdlib(inputs: list[str | Path], output: str | Path, *, sampl
         destination.setsampwidth(2)
         destination.setframerate(sample_rate)
         for index, item in enumerate(inputs):
-            if index and silence:
-                destination.writeframesraw(silence)
+            if index and gaps[index - 1]:
+                destination.writeframesraw(gaps[index - 1])
             with wave.open(str(item), "rb") as source:
                 channels = source.getnchannels()
                 width = source.getsampwidth()

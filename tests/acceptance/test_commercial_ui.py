@@ -79,6 +79,27 @@ def test_versioned_gpt_defaults_and_parameter_presets_are_reachable(project_root
     assert "保存为预设" in app_source and "applyParameterPreset" in app_source, "推理参数抽屉必须能保存并随时套用预设"
 
 
+def test_gpt_multi_speaker_flow_and_voice_isolation_are_reachable(project_root: Path, commercial_release: bool) -> None:
+    require_commercial_gate(commercial_release)
+    app_source = (project_root / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")
+    editor_source = (project_root / "frontend" / "src" / "MultiSpeakerEditor.tsx").read_text(encoding="utf-8")
+    helper_source = (project_root / "frontend" / "src" / "multiSpeaker.ts").read_text(encoding="utf-8")
+    styles = (project_root / "frontend" / "src" / "styles.css").read_text(encoding="utf-8")
+    assert "/api/jobs/multi-speaker" in app_source and "creationMode" in app_source
+    assert "【旁白】：" in editor_source and "invalidLines" in editor_source
+    assert "voiceProfileId" in editor_source and "presetId" in editor_source
+    assert "withoutGptVoiceParameters" in helper_source and "GPT_VOICE_PARAMETER_KEYS" in helper_source
+    assert "grid-template-columns: 1fr" in styles and ".multi-speaker-workspace" in styles
+
+
+def test_every_editable_field_has_native_right_click_edit_menu(project_root: Path, commercial_release: bool) -> None:
+    require_commercial_gate(commercial_release)
+    source = (project_root / "electron" / "main.cjs").read_text(encoding="utf-8")
+    assert "webContents.on('context-menu'" in source and "params.isEditable" in source
+    for label in ("撤销", "重做", "剪切", "复制", "粘贴", "删除", "全选"):
+        assert label in source
+
+
 def test_settings_and_diagnostics_are_reachable_from_ui(project_root: Path, commercial_release: bool) -> None:
     require_commercial_gate(commercial_release)
     frontend = "\n".join(

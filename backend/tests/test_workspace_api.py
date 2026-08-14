@@ -55,6 +55,37 @@ def test_project_crud_copy_search_and_atomic_persistence(tmp_path):
         assert client.get("/api/projects/../../settings.json").status_code in {400, 404}
 
 
+def test_multi_speaker_project_persists_role_mappings_and_rejects_other_engines(tmp_path):
+    with make_client(tmp_path) as client:
+        payload = {
+            "name": "双人对白",
+            "engine": "gpt_sovits",
+            "mode": "multi_speaker",
+            "text": "【旁白】：开始。\n【小明】：你好。",
+            "params": {"top_p": 0.7},
+            "multiSpeaker": {
+                "lineIntervalMs": 280,
+                "assignments": {
+                    "旁白": {"voiceProfileId": "voice-a", "presetId": "preset-a"},
+                    "小明": {"voiceProfileId": "voice-b", "presetId": ""},
+                },
+            },
+        }
+        created = client.post("/api/projects", json=payload)
+        assert created.status_code == 201, created.text
+        project = created.json()
+        assert project["mode"] == "multi_speaker"
+        assert project["multiSpeaker"] == payload["multiSpeaker"]
+
+        restored = client.get(f"/api/projects/{project['id']}")
+        assert restored.status_code == 200
+        assert restored.json()["multiSpeaker"]["assignments"]["旁白"]["presetId"] == "preset-a"
+
+        rejected = client.post("/api/projects", json={**payload, "engine": "voxcpm"})
+        assert rejected.status_code == 400
+        assert "只支持 GPT-SoVITS" in rejected.text
+
+
 def test_settings_persist_revision_conflict_migration_and_future_version_rejection(tmp_path):
     with make_client(tmp_path) as client:
         initial = client.get("/api/settings").json()

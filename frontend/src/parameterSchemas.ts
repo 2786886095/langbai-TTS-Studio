@@ -133,7 +133,7 @@ export const parameterGroups: Record<EngineId, Group[]> = {
     ] },
     { title: "采样与性能", summary: "完整 API v2 推理参数", fields: [
       { key: "top_k", label: "top_k", type: "number", default: 15, min: 1, max: 100, step: 1, help: "从概率最高的 K 个候选采样。" },
-      { key: "top_p", label: "top_p", type: "range", default: 1, min: 0.1, max: 1, step: 0.05, help: "核采样范围；降低可减少异常发音。" },
+      { key: "top_p", label: "top_p", type: "range", default: 0.7, min: 0.1, max: 1, step: 0.05, help: "核采样范围；默认 0.7，在自然度与稳定性之间取平衡。" },
       { key: "temperature", label: "temperature", type: "range", default: 1, min: 0.1, max: 2, step: 0.05, help: "控制随机性；过高可能不稳定。" },
       { key: "batch_size", label: "批量大小", type: "number", default: 1, min: 1, max: 32, step: 1, help: "并行句段数，增大提速但增加显存。" },
       { key: "batch_threshold", label: "批处理阈值", type: "range", default: 0.75, min: 0.1, max: 1, step: 0.05, help: "控制不同长度句段能否进入同一批。" },
