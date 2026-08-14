@@ -22,3 +22,7 @@ class EngineAdapter(ABC):
 
     def close(self) -> None:
         pass
+
+    def cancel_current(self) -> None:
+        """Interrupt the inference currently owned by this adapter, if any."""
+        pass

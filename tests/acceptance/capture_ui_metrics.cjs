@@ -1,5 +1,6 @@
 const { app, BrowserWindow } = require("electron");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 
 const projectRoot = path.resolve(__dirname, "..", "..");
@@ -12,7 +13,9 @@ const slugs = ["studio", "tasks", "audio-library", "history", "settings"];
 
 const DEFAULT_VIEWPORT = { width: 1920, height: 1080 };
 const MINIMUM_VIEWPORT = { width: 1180, height: 720 };
+const isolatedUserData = fs.mkdtempSync(path.join(os.tmpdir(), "langbai-ui-acceptance-"));
 
+app.setPath("userData", isolatedUserData);
 app.commandLine.appendSwitch("force-device-scale-factor", "1");
 if (process.env.CI) {
   app.commandLine.appendSwitch("disable-gpu");
@@ -144,6 +147,11 @@ async function capture(window, filename) {
   fs.writeFileSync(path.join(outputRoot, filename), image.toPNG());
 }
 
+async function loadFrontend(window) {
+  const backendUrl = process.env.LANGBAI_UI_BACKEND_URL;
+  await window.loadFile(distIndex, backendUrl ? { query: { backendUrl } } : undefined);
+}
+
 app.whenReady().then(async () => {
   fs.mkdirSync(outputRoot, { recursive: true });
   const window = new BrowserWindow({
@@ -155,9 +163,9 @@ app.whenReady().then(async () => {
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
   });
 
-  await window.loadFile(distIndex);
+  await loadFrontend(window);
   await window.webContents.executeJavaScript("localStorage.setItem('langbai-onboarding-complete', '1'); localStorage.setItem('langbai-density', 'comfortable')");
-  await window.loadFile(distIndex);
+  await loadFrontend(window);
   await window.webContents.setZoomFactor(1);
   await settle(window);
 
@@ -189,6 +197,20 @@ app.whenReady().then(async () => {
     const label = views[index];
     report.minimumViews[label] = await inspectView(window, label);
     await capture(window, `${String(index + 7).padStart(2, "0")}-${slugs[index]}-1180x720.png`);
+  }
+
+  if (process.env.LANGBAI_UI_CAPTURE_DELETE_DIALOG === "1") {
+    await inspectView(window, "历史记录");
+    const opened = await window.webContents.executeJavaScript(`(() => {
+      const button = Array.from(document.querySelectorAll(".row-actions button"))
+        .find(element => element.title === "删除记录");
+      if (!button) return false;
+      button.click();
+      return true;
+    })()`);
+    if (!opened) throw new Error("历史记录中没有可用于验证删除确认框的任务");
+    await settle(window);
+    await capture(window, "12-delete-dialog-1180x720.png");
   }
 
   window.setContentSize(DEFAULT_VIEWPORT.width, DEFAULT_VIEWPORT.height);

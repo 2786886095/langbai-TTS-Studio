@@ -31,7 +31,13 @@ def safe_output_path(store: JobStore, job: JobManifest) -> Path | None:
         return None
     job_root = store.job_dir(job.id).resolve()
     candidate = Path(job.output_path).resolve(strict=False)
-    if job_root != candidate.parent and job_root not in candidate.parents:
+    allowed_roots = [job_root]
+    if job.output_directory:
+        recorded_root = Path(job.output_directory).resolve(strict=False)
+        if recorded_root == Path(recorded_root.anchor):
+            raise UnsafeOutputPath(f"任务 {job.id} 的输出目录不能是磁盘根目录")
+        allowed_roots.append(recorded_root)
+    if candidate.parent not in allowed_roots:
         raise UnsafeOutputPath(f"任务 {job.id} 的输出路径越过任务目录")
     if candidate.suffix.lower() != ".wav":
         raise UnsafeOutputPath(f"任务 {job.id} 的输出不是 WAV 文件")

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -57,6 +57,52 @@ class JobCreate(BaseModel):
         return value
 
 
+class MultiSpeakerParseRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    script: str = Field(min_length=1)
+
+
+class MultiSpeakerAssignmentCreate(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    voice_profile_id: str = Field(alias="voiceProfileId", min_length=1)
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
+class MultiSpeakerJobCreate(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    script: str = Field(min_length=1)
+    assignments: dict[str, MultiSpeakerAssignmentCreate] = Field(min_length=1)
+    line_interval_ms: int = Field(default=280, alias="lineIntervalMs", ge=0, le=10_000)
+    long_audio: LongAudioOptions = Field(default_factory=LongAudioOptions, alias="longAudio")
+    title: str | None = None
+
+
+class ParsedSpeakerLine(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    line_number: int = Field(alias="lineNumber", ge=1)
+    speaker: str = Field(min_length=1, max_length=80)
+    text: str = Field(min_length=1)
+
+
+class MultiSpeakerAssignmentManifest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    voice_profile_id: str = Field(alias="voiceProfileId")
+    voice_name: str = Field(alias="voiceName")
+    parameters: dict[str, Any]
+
+
+class MultiSpeakerManifest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    line_interval_ms: int = Field(default=280, alias="lineIntervalMs", ge=0, le=10_000)
+    assignments: dict[str, MultiSpeakerAssignmentManifest]
+
+
 class SegmentManifest(BaseModel):
     id: str = ""
     index: int
@@ -64,6 +110,8 @@ class SegmentManifest(BaseModel):
     status: SegmentStatus = SegmentStatus.pending
     attempts: int = 0
     output_path: str | None = None
+    speaker: str | None = None
+    script_line_number: int | None = None
     error: str | None = None
 
 
@@ -71,6 +119,7 @@ class JobManifest(BaseModel):
     id: str
     engine: str
     title: str
+    mode: Literal["single", "multi_speaker"] = "single"
     status: JobStatus = JobStatus.queued
     progress: float = 0.0
     text: str
@@ -78,6 +127,9 @@ class JobManifest(BaseModel):
     long_audio: LongAudioOptions
     segments: list[SegmentManifest]
     output_path: str | None = None
+    output_directory: str | None = None
+    multi_speaker: MultiSpeakerManifest | None = None
+    session_id: str | None = None
     error: str | None = None
     created_at: str = Field(default_factory=now_iso)
     updated_at: str = Field(default_factory=now_iso)

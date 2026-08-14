@@ -32,7 +32,26 @@
 }
 ```
 
-返回的项目字段为 `schemaVersion`、`id`、`name`、`description`、`engine`、`text`、`params`、`longAudio`、`sourceProjectId`、`createdAt`、`updatedAt`。
+返回的项目字段为 `schemaVersion`、`id`、`name`、`description`、`engine`、`mode`、`text`、`params`、`multiSpeaker`、`longAudio`、`sourceProjectId`、`createdAt`、`updatedAt`。
+
+GPT-SoVITS 多人项目使用 `mode: "multi_speaker"`，并在 `multiSpeaker` 中保存全局台词间隔和角色映射：
+
+```json
+{
+  "name": "双人对白",
+  "engine": "gpt_sovits",
+  "mode": "multi_speaker",
+  "text": "【旁白】：开始。\n【小明】：你好。",
+  "params": {"top_p": 0.7},
+  "multiSpeaker": {
+    "lineIntervalMs": 280,
+    "assignments": {
+      "旁白": {"voiceProfileId": "...", "presetId": "..."},
+      "小明": {"voiceProfileId": "...", "presetId": ""}
+    }
+  }
+}
+```
 
 ### 单项目操作
 
@@ -40,6 +59,29 @@
 - `PUT /api/projects/{id}`：部分保存，只修改请求中出现的字段。
 - `POST /api/projects/{id}/copy`：请求体可为 `{"name":"副本名"}`；返回新 ID，并设置 `sourceProjectId`。
 - `DELETE /api/projects/{id}`：成功返回 `204`。
+
+## GPT-SoVITS 多人配音
+
+### `POST /api/multi-speaker/parse`
+
+请求体为 `{"script":"【旁白】：内容"}`。空行会忽略；每个非空物理行必须使用 `【角色名】：台词`（兼容英文冒号）。返回解析后的 `lines`、按首次出现排序的 `speakers`、`invalidLines` 和 `valid`。
+
+### `POST /api/jobs/multi-speaker`
+
+```json
+{
+  "title": "双人对白",
+  "script": "【旁白】：开始。\n【小明】：你好。",
+  "lineIntervalMs": 280,
+  "assignments": {
+    "旁白": {"voiceProfileId": "...", "params": {"top_p": 0.7}},
+    "小明": {"voiceProfileId": "...", "params": {"top_p": 0.65}}
+  },
+  "longAudio": {"maxChars": 180, "silenceMs": 250, "keepSegments": true}
+}
+```
+
+接口只接受 GPT-SoVITS 角色声音。`params` 仅允许推理参数，不能覆盖角色声音中的 GPT/SoVITS 权重、参考音频、参考文本、参考语言或版本。每个物理台词行保持独立；行内若因长文本再次分段，内部使用 `longAudio.silenceMs`，跨台词行使用 `lineIntervalMs`。成功返回 `202` 和普通任务清单，可继续使用现有查询、取消、重试、试听与定位接口。
 
 ## 全局设置
 
@@ -94,7 +136,7 @@
 
 ## 打开或定位任务输出
 
-`GET /api/jobs/{id}/output` 只解析属于该任务目录的 WAV 文件，阻止被篡改清单指向任意本地文件。成功返回音频元数据以及：
+`GET /api/jobs/{id}/output` 只解析属于该任务目录或任务生成时记录的受控输出目录的 WAV 文件，阻止被篡改清单指向任意本地文件。默认输出位置是软件根目录下的 `output`。成功返回音频元数据以及：
 
 ```json
 {
@@ -144,4 +186,4 @@ IndexTTS2/VoxCPM2 的 `acceptedToolLicenses` 只允许 `uv`；GPT-SoVITS 需要 
 
 ## 既有接口
 
-任务、引擎、SSE 和安装器接口保持不变：`/api/jobs`、`/api/engines`、`/api/events`、`/api/installations`、`/api/downloads`、`/api/installer/*`。
+任务、引擎、SSE 和安装器接口保持不变：`/api/jobs`、`/api/engines`、`/api/events`、`/api/installations`、`/api/downloads`、`/api/installer/*`。`DELETE /api/jobs/{id}?deleteOutput=false` 仅删除记录；传入 `deleteOutput=true` 时同时删除任务生成的 WAV 文件，活动任务必须先取消。

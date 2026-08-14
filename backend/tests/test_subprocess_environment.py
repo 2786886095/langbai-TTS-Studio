@@ -1,6 +1,56 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 from app.adapters.subprocess_adapter import SubprocessAdapter
+from engine_runtime import detect_gpt_sovits_version, has_override, recommended_gpt_sovits_sample_steps, resolve_torch_device
+
+
+def test_blank_gpt_device_uses_available_accelerator():
+    cuda_torch = SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: True))
+    cpu_torch = SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: False))
+
+    assert resolve_torch_device("", cuda_torch) == "cuda"
+    assert resolve_torch_device(None, cpu_torch) == "cpu"
+    assert resolve_torch_device("cuda:1", cpu_torch) == "cuda:1"
+    assert has_override("") is False
+    assert has_override("   ") is False
+    assert has_override(False) is True
+
+
+def test_gpt_sovits_defaults_follow_loaded_or_weight_version():
+    assert detect_gpt_sovits_version({"version": "v3"}, "v4") == "v4"
+    assert detect_gpt_sovits_version({"version": "auto", "vits_weights_path": r"D:\models\v4\hutao.pth"}) == "v4"
+    assert detect_gpt_sovits_version({"version": "auto", "t2s_weights_path": r"D:\models\v2ProPlus\voice.ckpt"}) == "v2ProPlus"
+    assert detect_gpt_sovits_version({"version": "auto", "vits_weights_path": r"D:\models\v1\legacy.pth"}) == "v1"
+    assert recommended_gpt_sovits_sample_steps("v3") == 32
+    assert recommended_gpt_sovits_sample_steps("v4") == 8
+
+
+def test_cancel_current_terminates_worker_without_waiting_for_adapter_lock(tmp_path: Path):
+    class FakeProcess:
+        def __init__(self):
+            self.returncode = None
+            self.terminated = False
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.terminated = True
+            self.returncode = 1
+
+        def wait(self, timeout):
+            assert timeout == 2
+            return self.returncode
+
+    adapter = SubprocessAdapter("indextts2", tmp_path / "python.exe", tmp_path / "engine", tmp_path / "logs")
+    process = FakeProcess()
+    adapter._process = process
+
+    adapter.cancel_current()
+
+    assert process.terminated is True
+    assert adapter._process is None
 
 
 def test_engine_process_does_not_inherit_backend_python_home(monkeypatch, tmp_path: Path):

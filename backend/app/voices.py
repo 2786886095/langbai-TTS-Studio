@@ -14,6 +14,33 @@ from .workspace import WorkspaceError, WorkspaceNotFound, _resource_id, atomic_w
 
 
 VOICE_PROFILE_SCHEMA_VERSION = 1
+GPT_VOICE_PROFILE_KEYS = {
+    "gpt_weights_path", "sovits_weights_path", "ref_audio_path", "aux_ref_audio_paths",
+    "prompt_text", "prompt_lang", "version",
+}
+GPT_VOICE_API_KEYS = {
+    "t2s_weights_path", "vits_weights_path", "reference_audio", "aux_reference_audios",
+    "prompt_text", "prompt_language", "version",
+}
+_LANGUAGE_CODES = {
+    "自动识别": "auto", "中文": "zh", "英文": "en", "日文": "ja", "韩文": "ko",
+    "粤语": "yue", "中英混合": "auto", "日英混合": "auto", "多语种混合": "auto",
+}
+
+
+def gpt_voice_parameters_to_api(parameters: dict[str, Any]) -> dict[str, Any]:
+    values = {key: parameters.get(key) for key in GPT_VOICE_PROFILE_KEYS}
+    auxiliary = values.get("aux_ref_audio_paths")
+    auxiliary_list = [str(auxiliary)] if str(auxiliary or "").strip() else None
+    return {
+        "t2s_weights_path": values.get("gpt_weights_path") or None,
+        "vits_weights_path": values.get("sovits_weights_path") or None,
+        "reference_audio": values.get("ref_audio_path") or None,
+        "aux_reference_audios": auxiliary_list,
+        "prompt_text": values.get("prompt_text") or "",
+        "prompt_language": _LANGUAGE_CODES.get(str(values.get("prompt_lang") or ""), "auto"),
+        "version": values.get("version") or "auto",
+    }
 
 
 class VoiceProfileCreate(BaseModel):

@@ -11,6 +11,7 @@ from typing import Iterator
 from fastapi import FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
+from pydantic import BaseModel, ConfigDict, Field
 
 from .adapters import MockAdapter, build_default_adapters
 from .bindings import EngineBindingRequest, EngineBindingStore, EngineDiscoveryRequest
@@ -24,9 +25,12 @@ from .installer import InstallerManager, InstallRequest, ModelInstallRequest, To
 from .installer.manager import InstallConflictError
 from .diagnostics import DiagnosticExporter, DiagnosticNotFound
 from .library import output_state, search_jobs
-from .models import JobCreate
+from .models import JobCreate, MultiSpeakerJobCreate, MultiSpeakerParseRequest
+from .multi_speaker import parse_multi_speaker_script
+from .model_scanner import scan_gpt_sovits_models
 from .parameters import ENGINE_INFO, ENGINE_PARAMETERS, engine_catalog
 from .storage import JobStore
+from .training import TrainingError, TrainingManager, VoxTrainingCreate
 from .voices import (
     VOICE_PROFILE_SCHEMA_VERSION,
     VoiceProfileCreate,
@@ -49,7 +53,13 @@ from .workspace import (
 )
 
 
-BACKEND_ROOT = Path(__file__).resolve().parents[1]
+class CommunityScanRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    paths: list[str] = Field(default_factory=list, max_length=8)
+
+
+BACKEND_ROOT = Path(os.getenv("LANGBAI_BACKEND_ROOT") or Path(__file__).resolve().parents[1]).resolve()
 
 
 def _job_payload(job) -> dict:
@@ -65,7 +75,12 @@ def create_app(*, adapters=None, data_dir: str | Path | None = None, mock_mode: 
                installer_manager: InstallerManager | None = None) -> FastAPI:
     if mock_mode is None:
         mock_mode = os.getenv("LANGBAI_TTS_MOCK", "0") == "1"
-    root = Path(data_dir or os.getenv("LANGBAI_TTS_DATA", BACKEND_ROOT / "data"))
+    explicit_data_dir = data_dir is not None or bool(os.getenv("LANGBAI_TTS_DATA"))
+    root = Path(data_dir or os.getenv("LANGBAI_TTS_DATA", BACKEND_ROOT / "data")).resolve()
+    default_output_root = Path(
+        os.getenv("LANGBAI_OUTPUT_ROOT")
+        or ((root / "output") if explicit_data_dir else (BACKEND_ROOT.parent / "output"))
+    ).resolve()
     managed_install_root = Path(os.getenv("LANGBAI_INSTALL_ROOT") or (root / "managed")).resolve()
     bindings = EngineBindingStore(root / "engine-bindings.json")
     if adapters is None:
@@ -73,15 +88,24 @@ def create_app(*, adapters=None, data_dir: str | Path | None = None, mock_mode: 
             adapters = {engine_id: MockAdapter(engine_id) for engine_id in ENGINE_INFO}
         else:
             adapters = build_default_adapters(root / "logs", managed_install_root, bindings)
-    manager = JobManager(JobStore(root / "jobs"), adapters, mock_mode=mock_mode)
+    settings_store = SettingsStore(root / "settings.json", default_output_directory=default_output_root)
+    voices = VoiceProfileStore(root / "voice-profiles")
+    manager = JobManager(
+        JobStore(root / "jobs", output_directory=lambda: settings_store.get().output_directory or default_output_root),
+        adapters,
+        mock_mode=mock_mode,
+        voice_store=voices,
+    )
     installer = installer_manager or InstallerManager(
         root, default_install_root=managed_install_root
     )
     projects = ProjectStore(root / "projects")
-    voices = VoiceProfileStore(root / "voice-profiles")
     community_models = CommunityModelManager(root / "community-models")
-    settings_store = SettingsStore(root / "settings.json")
     diagnostics = DiagnosticExporter(root / "diagnostics", root / "logs")
+    training = TrainingManager(
+        root / "training", adapters, BACKEND_ROOT / "training_worker.py", mock_mode=mock_mode,
+        gpt_worker_path=BACKEND_ROOT / "gpt_workbench_worker.py",
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -90,10 +114,11 @@ def create_app(*, adapters=None, data_dir: str | Path | None = None, mock_mode: 
         try:
             yield
         finally:
+            training.close()
             manager.close()
             installer.close()
 
-    api = FastAPI(title="langbai TTS Studio API", version="1.1.0", lifespan=lifespan)
+    api = FastAPI(title="langbai TTS Studio API", version="1.2.7", lifespan=lifespan)
     api.state.manager = manager
     api.state.installer = installer
     api.state.projects = projects
@@ -102,6 +127,8 @@ def create_app(*, adapters=None, data_dir: str | Path | None = None, mock_mode: 
     api.state.settings = settings_store
     api.state.diagnostics = diagnostics
     api.state.bindings = bindings
+    api.state.adapters = adapters
+    api.state.training = training
     api.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost", "http://127.0.0.1", "null"],
@@ -131,6 +158,132 @@ def create_app(*, adapters=None, data_dir: str | Path | None = None, mock_mode: 
     def engine_status():
         return [adapter.status() for adapter in manager.adapters.values()]
 
+    @api.get("/api/runtime/engines")
+    def runtime_engines(lines: int = Query(default=160, ge=20, le=500)):
+        items = []
+        for adapter in manager.adapters.values():
+            snapshot = getattr(adapter, "runtime_snapshot", None)
+            items.append(snapshot(lines) if callable(snapshot) else {**adapter.status(), "running": False, "pid": None, "command": [], "cwd": "", "logPath": "", "logLines": []})
+        return {"items": items}
+
+    def runtime_adapter(engine_id: str):
+        adapter = manager.adapters.get(engine_id)
+        if adapter is None:
+            raise HTTPException(status_code=404, detail="引擎不存在")
+        return adapter
+
+    @api.post("/api/runtime/engines/{engine_id}/start")
+    def start_runtime_engine(engine_id: str):
+        adapter = runtime_adapter(engine_id)
+        start = getattr(adapter, "start", None)
+        if not callable(start):
+            raise HTTPException(status_code=409, detail="该引擎不支持手动启动")
+        try:
+            start()
+            return {"ok": True, "action": "start", "engine": engine_id}
+        except Exception as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @api.post("/api/runtime/engines/{engine_id}/stop")
+    def stop_runtime_engine(engine_id: str):
+        runtime_adapter(engine_id).close()
+        return {"ok": True, "action": "stop", "engine": engine_id}
+
+    @api.post("/api/runtime/engines/{engine_id}/restart")
+    def restart_runtime_engine(engine_id: str):
+        adapter = runtime_adapter(engine_id)
+        restart = getattr(adapter, "restart", None)
+        try:
+            if callable(restart):
+                restart()
+            else:
+                adapter.close()
+                start = getattr(adapter, "start", None)
+                if not callable(start):
+                    raise RuntimeError("该引擎不支持手动重启")
+                start()
+            return {"ok": True, "action": "restart", "engine": engine_id}
+        except Exception as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @api.get("/api/runtime/activity")
+    def runtime_activity():
+        engine_rows = []
+        for adapter in manager.adapters.values():
+            snapshot = getattr(adapter, "runtime_snapshot", None)
+            row = snapshot(20) if callable(snapshot) else {**adapter.status(), "running": False, "pid": None}
+            if row.get("running"):
+                engine_rows.append({"id": row.get("id"), "pid": row.get("pid"), "state": row.get("state")})
+        job_rows = [
+            {"id": job.id, "title": job.title, "status": job.status.value}
+            for job in manager.list() if job.status.value in {"queued", "running"}
+        ]
+        training_rows = training.active_summary()
+        return {
+            "active": bool(engine_rows or job_rows or training_rows),
+            "engines": engine_rows, "jobs": job_rows, "training": training_rows,
+        }
+
+    @api.post("/api/runtime/terminate-active")
+    def terminate_active_runtime():
+        jobs = [job for job in manager.list() if job.status.value in {"queued", "running"}]
+        for job in jobs:
+            manager.cancel(job.id)
+        training.terminate_active(wait=False)
+        return {"ok": True, "cancelledJobs": len(jobs), "stoppingTraining": len(training.active_summary())}
+
+    @api.get("/api/training/capabilities")
+    def training_capabilities():
+        return {"voxcpm": training.capabilities(), "gptSovits": training.gpt_workbench_status(lines=40)}
+
+    @api.get("/api/training/gpt-sovits/workbench")
+    def gpt_sovits_training_workbench():
+        return training.gpt_workbench_status()
+
+    @api.post("/api/training/gpt-sovits/workbench/start")
+    def start_gpt_sovits_training_workbench():
+        try:
+            return training.start_gpt_workbench()
+        except TrainingError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @api.post("/api/training/gpt-sovits/workbench/stop")
+    def stop_gpt_sovits_training_workbench():
+        return training.stop_gpt_workbench(wait=False)
+
+    @api.get("/api/training/tasks")
+    def training_tasks():
+        items = [training.snapshot(item["id"], lines=80) for item in training.list()]
+        return {"items": items, "total": len(items)}
+
+    @api.post("/api/training/tasks", status_code=status.HTTP_202_ACCEPTED)
+    def create_training_task(request: VoxTrainingCreate):
+        try:
+            return training.create(request)
+        except (OSError, TrainingError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @api.get("/api/training/tasks/{task_id}")
+    def get_training_task(task_id: str, lines: int = Query(default=240, ge=20, le=500)):
+        try:
+            return training.snapshot(task_id, lines=lines)
+        except TrainingError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @api.post("/api/training/tasks/{task_id}/stop")
+    def stop_training_task(task_id: str):
+        try:
+            return training.stop(task_id)
+        except TrainingError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @api.post("/api/training/tasks/{task_id}/resume")
+    def resume_training_task(task_id: str):
+        try:
+            return training.resume(task_id)
+        except (OSError, TrainingError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     @api.get("/api/engines/{engine_id}/parameters")
     def engine_parameters(engine_id: str):
         if engine_id not in ENGINE_PARAMETERS:
@@ -145,6 +298,24 @@ def create_app(*, adapters=None, data_dir: str | Path | None = None, mock_mode: 
     def create_job(request: JobCreate):
         try:
             return _job_payload(manager.create(request))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @api.post("/api/multi-speaker/parse")
+    def parse_multi_speaker(request: MultiSpeakerParseRequest):
+        lines, invalid_lines = parse_multi_speaker_script(request.script)
+        speakers = list(dict.fromkeys(line.speaker for line in lines))
+        return {
+            "lines": [line.model_dump(mode="json", by_alias=True) for line in lines],
+            "speakers": speakers,
+            "invalidLines": invalid_lines,
+            "valid": bool(lines) and not invalid_lines,
+        }
+
+    @api.post("/api/jobs/multi-speaker", status_code=status.HTTP_202_ACCEPTED)
+    def create_multi_speaker_job(request: MultiSpeakerJobCreate):
+        try:
+            return _job_payload(manager.create_multi_speaker(request))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -169,6 +340,15 @@ def create_app(*, adapters=None, data_dir: str | Path | None = None, mock_mode: 
     def retry_job(job_id: str):
         try:
             return _job_payload(manager.retry(job_id))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="任务不存在") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @api.delete("/api/jobs/{job_id}")
+    def delete_job(job_id: str, delete_output: bool = Query(default=False, alias="deleteOutput")):
+        try:
+            return manager.delete(job_id, delete_output=delete_output)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="任务不存在") from exc
         except ValueError as exc:
@@ -211,7 +391,7 @@ def create_app(*, adapters=None, data_dir: str | Path | None = None, mock_mode: 
     def create_project(request: ProjectCreate):
         try:
             return projects.create(request).model_dump(mode="json", by_alias=True)
-        except WorkspaceError as exc:
+        except (ValueError, WorkspaceError) as exc:
             workspace_error(exc)
 
     @api.get("/api/projects/{project_id}")
@@ -310,6 +490,30 @@ def create_app(*, adapters=None, data_dir: str | Path | None = None, mock_mode: 
             items = community_models.models(category, language)
             return {"items": items, "total": len(items)}
         except (CommunityCatalogError, ValueError) as exc:
+            community_error(exc)
+
+    @api.get("/api/community-models/hugging-face")
+    def hugging_face_community_models(
+        query: str = Query(default="gpt-sovits", max_length=100),
+        limit: int = Query(default=80, ge=1, le=100),
+    ):
+        try:
+            items = community_models.hugging_face_models(query, limit)
+            return {"items": items, "total": len(items), "searchPage": "https://huggingface.co/models?search=gpt-sovits"}
+        except (CommunityCatalogError, ValueError) as exc:
+            community_error(exc)
+
+    @api.get("/api/community-models/external-sources")
+    def external_community_model_sources():
+        items = community_models.external_sources()
+        return {"items": items, "total": len(items)}
+
+    @api.post("/api/community-models/scan")
+    def scan_community_model_files(request: CommunityScanRequest):
+        try:
+            paths = request.paths or community_models.default_scan_paths()
+            return scan_gpt_sovits_models(paths)
+        except (OSError, ValueError) as exc:
             community_error(exc)
 
     @api.get("/api/community-models/installed")

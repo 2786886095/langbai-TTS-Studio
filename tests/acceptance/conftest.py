@@ -91,11 +91,14 @@ def require_path(path: Path, require: bool, purpose: str) -> None:
 
 
 @pytest.fixture(scope="session")
-def backend_app(project_root: Path, require_implementation: bool):
+def backend_app(project_root: Path, require_implementation: bool, tmp_path_factory: pytest.TempPathFactory):
     main_path = project_root / "backend" / "app" / "main.py"
     require_path(main_path, require_implementation, "backend application")
 
+    isolated_root = tmp_path_factory.mktemp("langbai-acceptance")
     os.environ["LANGBAI_TTS_MOCK"] = "1"
+    os.environ["LANGBAI_TTS_DATA"] = str(isolated_root / "data")
+    os.environ["LANGBAI_OUTPUT_ROOT"] = str(isolated_root / "output")
     sys.path.insert(0, str(project_root / "backend"))
     try:
         from app.main import app  # type: ignore

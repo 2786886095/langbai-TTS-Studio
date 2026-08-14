@@ -53,3 +53,12 @@ class MockAdapter(EngineAdapter):
 
     def status(self) -> dict[str, Any]:
         return {"id": self.engine_id, "available": True, "state": "mock", "detail": "测试替身已启用"}
+
+    def runtime_snapshot(self, lines: int = 160) -> dict[str, Any]:
+        return {**self.status(), "running": False, "pid": None, "command": ["mock-engine"], "cwd": "", "logPath": "", "logLines": []}
+
+    def start(self) -> None:
+        return None
+
+    def restart(self) -> None:
+        return None

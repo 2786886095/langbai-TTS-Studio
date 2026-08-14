@@ -10,8 +10,8 @@ import uuid
 import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
-from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.parse import urlencode, urlparse
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -21,7 +21,11 @@ from .workspace import atomic_write_json
 
 CATALOG_ROOT = "https://rs.acgnai.top/api/model_libry"
 COMMUNITY_SOURCE_PAGE = "https://www.ai-hobbyist.com/forum.php?mod=forumdisplay&fid=138"
+HUGGING_FACE_API = "https://huggingface.co/api/models"
 ALLOWED_DOWNLOAD_HOSTS = {"pan.acgnai.top", "rs.acgnai.top"}
+ALLOWED_DOWNLOAD_HOST_PATTERNS = (
+    re.compile(r"^cdn-lfs-cn-\d+\.modelscope\.cn$", re.IGNORECASE),
+)
 ALLOWED_ARCHIVE_SUFFIXES = {
     ".ckpt", ".pth", ".wav", ".mp3", ".flac", ".ogg", ".m4a",
     ".txt", ".json", ".md", ".yaml", ".yml",
@@ -29,6 +33,81 @@ ALLOWED_ARCHIVE_SUFFIXES = {
 MAX_ARCHIVE_BYTES = 2 * 1024**3
 MAX_EXPANDED_BYTES = 4 * 1024**3
 MAX_ARCHIVE_MEMBERS = 20_000
+
+CLOUD_MODEL_SOURCES = [
+    {
+        "id": "bilibili-model-search",
+        "name": "Bilibili GPT-SoVITS 模型分享检索",
+        "platform": "Bilibili / 多种网盘",
+        "sourceType": "cloud",
+        "sourcePage": "https://search.bilibili.com/all?keyword=GPT-SoVITS%E6%A8%A1%E5%9E%8B%E5%88%86%E4%BA%AB",
+        "summary": "持续更新的模型分享视频和动态入口；下载路径通常位于简介、置顶评论或作者动态。",
+        "licenseNotice": "Bilibili 搜索结果并非软件审核目录，链接有效性与许可由发布者决定。",
+    },
+    {
+        "id": "hf-search",
+        "name": "Hugging Face GPT-SoVITS 模型索引",
+        "platform": "Hugging Face",
+        "sourceType": "repository",
+        "sourcePage": "https://huggingface.co/models?search=gpt-sovits",
+        "summary": "实时索引约 260 个相关仓库；仓库可能包含多个角色的 GPT 与 SoVITS 权重。",
+        "licenseNotice": "每个仓库的许可证不同，下载前应查看模型卡和文件页。",
+    },
+    {
+        "id": "unlimitedburst-collection",
+        "name": "原神・崩坏3・星穹铁道・绝区零・蔚蓝档案合集",
+        "platform": "Hugging Face",
+        "sourceType": "repository",
+        "sourcePage": "https://huggingface.co/UnlimitedBurst/GPT-SoVITS/tree/main",
+        "summary": "大型 V2 角色模型合集，含多个作品分类和参考音频。",
+        "licenseNotice": "仓库标注 MIT，但角色声音素材及二次使用权仍需使用者自行确认。",
+    },
+    {
+        "id": "xiaomipo-downloads",
+        "name": "GPT-SoVITS 整合包与网盘下载中心",
+        "platform": "百度网盘 / 夸克网盘",
+        "sourceType": "cloud",
+        "sourcePage": "https://gpt-sovits.xiaomipo.com/download.html",
+        "summary": "提供 V2、V2Pro、V3、V4 等整合包的百度和夸克网盘入口。",
+        "licenseNotice": "第三方转载页面；文件来源、完整性和许可需自行核对。",
+    },
+    {
+        "id": "official-baidu-index",
+        "name": "花儿不哭 GPT-SoVITS 整合包与模型入口",
+        "platform": "百度网盘",
+        "sourceType": "cloud",
+        "sourcePage": "https://www.kbiao.net/138.html",
+        "summary": "整理官方项目、教程及百度网盘模型入口。",
+        "licenseNotice": "页面和网盘内容可能变化；应以原作者说明为准。",
+    },
+    {
+        "id": "laoba-bilibili",
+        "name": "岛市老八 GPT-SoVITS 模型",
+        "platform": "百度网盘 / 阿里云盘",
+        "sourceType": "cloud",
+        "sourcePage": "https://www.bilibili.com/video/BV1rz421y7C9/",
+        "summary": "模型分享原帖提供阿里云盘与百度网盘路径。",
+        "licenseNotice": "许可未明确；不得据此推定可商用或可二次分发。",
+    },
+    {
+        "id": "garen-bilibili",
+        "name": "LOL AI 盖伦 GPT-SoVITS V3 模型",
+        "platform": "百度网盘",
+        "sourceType": "cloud",
+        "sourcePage": "https://www.bilibili.com/opus/1038870701109411847",
+        "summary": "Bilibili 模型分享动态，含网盘下载入口。",
+        "licenseNotice": "许可未明确；角色与游戏素材权利需自行确认。",
+    },
+    {
+        "id": "zeyin-bilibili",
+        "name": "泽音 AI 语音 GPT-SoVITS 模型分享",
+        "platform": "百度网盘",
+        "sourceType": "cloud",
+        "sourcePage": "https://www.bilibili.com/video/BV1fM9NYnEuc/",
+        "summary": "社区模型分享视频及百度网盘路径。",
+        "licenseNotice": "许可未明确；下载后请保留原帖信息并自行承担使用风险。",
+    },
+]
 
 
 class CommunityCatalogError(RuntimeError):
@@ -104,6 +183,56 @@ class CommunityCatalogClient:
         return result
 
 
+class HuggingFaceCatalogClient:
+    def __init__(self, endpoint: str = HUGGING_FACE_API, timeout: int = 30):
+        self.endpoint = endpoint
+        self.timeout = timeout
+
+    def models(self, query: str = "gpt-sovits", limit: int = 80) -> list[dict[str, Any]]:
+        search = query.strip() or "gpt-sovits"
+        params = urlencode({"search": search, "limit": max(1, min(limit, 100)), "full": "true"})
+        request = Request(
+            f"{self.endpoint}?{params}",
+            headers={"Accept": "application/json", "User-Agent": "langbai-TTS-Studio/1.2"},
+        )
+        try:
+            with urlopen(request, timeout=self.timeout) as response:
+                rows = json.loads(response.read().decode("utf-8"))
+        except Exception as exc:
+            raise CommunityCatalogError(f"Hugging Face 模型索引暂时不可用：{exc}") from exc
+        result: list[dict[str, Any]] = []
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict) or row.get("private") or row.get("gated"):
+                continue
+            model_id = str(row.get("id") or row.get("modelId") or "").strip()
+            if not model_id:
+                continue
+            siblings = row.get("siblings") if isinstance(row.get("siblings"), list) else []
+            files = [str(item.get("rfilename") or "") for item in siblings if isinstance(item, dict)]
+            gpt_count = sum(name.casefold().endswith(".ckpt") for name in files)
+            sovits_count = sum(name.casefold().endswith(".pth") for name in files)
+            audio_count = sum(Path(name).suffix.casefold() in {".wav", ".mp3", ".flac", ".ogg", ".m4a"} for name in files)
+            tags = [str(tag) for tag in row.get("tags", []) if isinstance(tag, str)]
+            license_tag = next((tag.split(":", 1)[1] for tag in tags if tag.startswith("license:")), None)
+            result.append({
+                "id": hashlib.sha256(model_id.encode("utf-8")).hexdigest()[:20],
+                "name": model_id,
+                "platform": "Hugging Face",
+                "sourceType": "repository",
+                "sourcePage": f"https://huggingface.co/{model_id}/tree/main",
+                "gptWeights": gpt_count,
+                "sovitsWeights": sovits_count,
+                "audioFiles": audio_count,
+                "likes": int(row.get("likes") or 0),
+                "downloads": int(row.get("downloads") or 0),
+                "lastModified": row.get("lastModified"),
+                "license": license_tag,
+                "readyPair": gpt_count > 0 and sovits_count > 0,
+                "licenseNotice": f"仓库许可证：{license_tag}" if license_tag else "仓库未声明可识别的许可证，请查看模型卡。",
+            })
+        return sorted(result, key=lambda item: (not item["readyPair"], -item["likes"], item["name"].casefold()))
+
+
 def _safe_name(value: str) -> str:
     cleaned = re.sub(r"[<>:\"/\\|?*\x00-\x1f]", "_", value).strip(" .")
     if not cleaned:
@@ -114,8 +243,18 @@ def _safe_name(value: str) -> str:
 
 def _validate_download_url(url: str) -> None:
     parsed = urlparse(url)
-    if parsed.scheme != "https" or parsed.hostname not in ALLOWED_DOWNLOAD_HOSTS:
+    hostname = (parsed.hostname or "").casefold()
+    trusted_host = hostname in ALLOWED_DOWNLOAD_HOSTS or any(pattern.fullmatch(hostname) for pattern in ALLOWED_DOWNLOAD_HOST_PATTERNS)
+    if parsed.scheme != "https" or not trusted_host:
         raise CommunityCatalogError("社区目录返回了不受信任的下载地址，已拒绝下载")
+
+
+class _TrustedDownloadRedirectHandler(HTTPRedirectHandler):
+    """Reject an untrusted redirect before urllib connects to the target."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        _validate_download_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def _safe_archive_members(archive: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
@@ -139,13 +278,14 @@ def _safe_archive_members(archive: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
 
 
 class CommunityModelManager:
-    def __init__(self, root: str | Path, catalog: CommunityCatalogClient | None = None):
+    def __init__(self, root: str | Path, catalog: CommunityCatalogClient | None = None, hugging_face: HuggingFaceCatalogClient | None = None):
         self.root = Path(root).resolve()
         self.installed_root = self.root / "installed"
         self.cache_root = self.root / "cache"
         self.installed_root.mkdir(parents=True, exist_ok=True)
         self.cache_root.mkdir(parents=True, exist_ok=True)
         self.catalog = catalog or CommunityCatalogClient()
+        self.hugging_face = hugging_face or HuggingFaceCatalogClient()
         self._jobs: dict[str, CommunityDownloadJob] = {}
         self._lock = threading.RLock()
 
@@ -166,6 +306,17 @@ class CommunityModelManager:
             "licenseNotice": "目录接口只提供模型名与压缩包地址，不提供逐模型许可证；下载前请在社区模型区自行核对作者、用途限制与署名要求。",
             "installed": installed.get((category, language, row["name"])),
         } for row in self.catalog.models(category, language)]
+
+    def hugging_face_models(self, query: str = "gpt-sovits", limit: int = 80) -> list[dict[str, Any]]:
+        return self.hugging_face.models(query, limit)
+
+    def external_sources(self) -> list[dict[str, Any]]:
+        return [dict(item) for item in CLOUD_MODEL_SOURCES]
+
+    def default_scan_paths(self) -> list[str]:
+        home = Path.home()
+        candidates = [home / "Downloads", home / "Desktop", self.installed_root]
+        return [str(path.resolve(strict=False)) for path in candidates if path.is_dir()]
 
     def list_installed(self) -> list[dict[str, Any]]:
         rows = []
@@ -228,8 +379,9 @@ class CommunityModelManager:
                 raise CommunityCatalogError("该社区模型已经安装")
             cache.mkdir(parents=True, exist_ok=False)
             self._set(job.id, status="downloading", progress=0.01, message="正在下载社区模型")
-            request = Request(download_url, headers={"User-Agent": "langbai-TTS-Studio/1.1"})
-            with urlopen(request, timeout=60) as response, archive_path.open("wb") as output:
+            request = Request(download_url, headers={"User-Agent": "langbai-TTS-Studio/1.2"})
+            opener = build_opener(_TrustedDownloadRedirectHandler())
+            with opener.open(request, timeout=60) as response, archive_path.open("wb") as output:
                 final_url = response.geturl()
                 _validate_download_url(final_url)
                 total = int(response.headers.get("Content-Length") or 0)
@@ -271,6 +423,7 @@ class CommunityModelManager:
                 [path for suffix in ("*.wav", "*.mp3", "*.flac", "*.ogg", "*.m4a") for path in extract_root.rglob(suffix)],
                 key=lambda path: ("reference_audios" not in str(path).lower(), str(path)),
             )
+            destination.parent.mkdir(parents=True, exist_ok=True)
             os.replace(extract_root, destination)
             gpt_path = destination / gpt_files[0].relative_to(extract_root)
             sovits_path = destination / sovits_files[0].relative_to(extract_root)

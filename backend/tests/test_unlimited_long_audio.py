@@ -24,3 +24,16 @@ def test_many_segments_are_streamed_into_one_audio_file(tmp_path):
     expected_frames = 80 * 320 + 79 * 80
     assert info.frames == expected_frames
     assert info.samplerate == sample_rate
+
+
+def test_merge_supports_a_distinct_silence_duration_for_each_gap(tmp_path):
+    sample_rate = 16_000
+    segments = []
+    for index in range(3):
+        path = tmp_path / f"gap-{index}.wav"
+        sf.write(path, np.full(160, 0.1, dtype=np.float32), sample_rate)
+        segments.append(path)
+
+    output = merge_wav_files(segments, tmp_path / "variable-gaps.wav", sample_rate=sample_rate, silence_ms=[100, 280])
+    info = sf.info(output)
+    assert info.frames == 3 * 160 + 1600 + 4480

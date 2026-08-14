@@ -1,4 +1,5 @@
 import time
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -35,13 +36,15 @@ def test_engine_metadata_and_job_contract(tmp_path):
 
         response = client.post("/api/jobs", json={
             "engine": "gpt_sovits", "text": "一段测试文本。另一段测试文本。",
-            "params": {"mock_sample_rate": 16000},
+            "params": {"mock_sample_rate": 16000, "sample_steps_auto": True},
             "longAudio": {"maxChars": 8, "targetSampleRate": 24000, "maxRetries": 1},
         })
         assert response.status_code == 202, response.text
         payload = response.json()
         assert payload["status"] == "queued"
         assert payload["params"]["mock_sample_rate"] == 16000
+        assert payload["params"]["sample_steps_auto"] is True
+        assert payload["title"] == "一段测试文本"
         assert payload["longAudio"]["maxChars"] == 8
         job_id = payload["id"]
         for _ in range(200):
@@ -51,7 +54,26 @@ def test_engine_metadata_and_job_contract(tmp_path):
             time.sleep(0.02)
         assert payload["status"] == "completed"
         assert payload["output_path"]
+        assert Path(payload["output_path"]).parent == (tmp_path / "output").resolve()
         assert client.get("/api/jobs").json()[0]["id"] == job_id
+
+
+def test_new_application_session_starts_with_empty_queue_but_keeps_history(tmp_path):
+    adapters = {name: MockAdapter(name) for name in ("indextts2", "voxcpm", "gpt_sovits")}
+    with TestClient(create_app(adapters=adapters, data_dir=tmp_path, mock_mode=True)) as client:
+        created = client.post("/api/jobs", json={"engine": "indextts2", "text": "跨启动保留历史。"})
+        job_id = created.json()["id"]
+        for _ in range(200):
+            if client.get(f"/api/jobs/{job_id}").json()["status"] == "completed":
+                break
+            time.sleep(0.02)
+
+    restarted_adapters = {name: MockAdapter(name) for name in ("indextts2", "voxcpm", "gpt_sovits")}
+    with TestClient(create_app(adapters=restarted_adapters, data_dir=tmp_path, mock_mode=True)) as client:
+        assert client.get("/api/jobs").json() == []
+        history = client.get("/api/history").json()
+        assert history["total"] == 1
+        assert history["items"][0]["id"] == job_id
 
 
 def test_unknown_engine_parameter_is_rejected(tmp_path):
@@ -63,3 +85,45 @@ def test_unknown_engine_parameter_is_rejected(tmp_path):
         })
         assert response.status_code == 400
         assert "未知" in response.json()["detail"]
+
+
+def test_runtime_console_and_model_scan_contract(tmp_path):
+    adapters = {name: MockAdapter(name) for name in ("indextts2", "voxcpm", "gpt_sovits")}
+    app = create_app(adapters=adapters, data_dir=tmp_path / "data", mock_mode=True)
+    model_root = tmp_path / "downloaded-model"
+    model_root.mkdir()
+    (model_root / "demo-e10.ckpt").write_bytes(b"gpt")
+    (model_root / "demo-s20.pth").write_bytes(b"sovits")
+
+    with TestClient(app) as client:
+        runtime = client.get("/api/runtime/engines?lines=40")
+        assert runtime.status_code == 200
+        assert {item["id"] for item in runtime.json()["items"]} == set(adapters)
+        assert all("logLines" in item and "command" in item for item in runtime.json()["items"])
+
+        assert client.post("/api/runtime/engines/gpt_sovits/start").json()["ok"] is True
+        assert client.post("/api/runtime/engines/gpt_sovits/restart").json()["ok"] is True
+        assert client.post("/api/runtime/engines/gpt_sovits/stop").json()["ok"] is True
+        assert client.post("/api/runtime/engines/unknown/start").status_code == 404
+
+        scan = client.post("/api/community-models/scan", json={"paths": [str(model_root)]})
+        assert scan.status_code == 200
+        assert len(scan.json()["items"]) == 1
+        assert scan.json()["items"][0]["gptWeightsPath"].endswith(".ckpt")
+
+        activity = client.get("/api/runtime/activity")
+        assert activity.status_code == 200
+        assert activity.json()["active"] is False
+
+        capabilities = client.get("/api/training/capabilities")
+        assert capabilities.status_code == 200
+        assert {"voxcpm", "gptSovits"}.issubset(capabilities.json())
+        workbench = client.post("/api/training/gpt-sovits/workbench/start")
+        assert workbench.status_code == 200
+        assert workbench.json()["running"] is True
+        assert client.get("/api/runtime/activity").json()["active"] is True
+        assert client.post("/api/training/gpt-sovits/workbench/stop").json()["running"] is False
+
+        terminated = client.post("/api/runtime/terminate-active")
+        assert terminated.status_code == 200
+        assert terminated.json()["ok"] is True

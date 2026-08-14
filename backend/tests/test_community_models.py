@@ -1,11 +1,15 @@
 import io
 import json
 import zipfile
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import app.community_models as community_models_module
 from app.community_models import (
     CommunityCatalogError,
+    CommunityInstallRequest,
     CommunityModelManager,
     _safe_archive_members,
     _validate_download_url,
@@ -31,6 +35,32 @@ def make_zip(rows):
             archive.writestr(name, content)
     buffer.seek(0)
     return zipfile.ZipFile(buffer)
+
+
+def make_zip_bytes(rows):
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for name, content in rows:
+            archive.writestr(name, content)
+    return buffer.getvalue()
+
+
+class FakeDownloadResponse:
+    def __init__(self, payload):
+        self.payload = io.BytesIO(payload)
+        self.headers = {"Content-Length": str(len(payload))}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def geturl(self):
+        return "https://pan.acgnai.top/test.zip"
+
+    def read(self, size=-1):
+        return self.payload.read(size)
 
 
 def test_catalog_rows_include_source_and_install_state(tmp_path):
@@ -80,7 +110,49 @@ def test_archive_rejects_path_traversal_even_for_ignored_files():
 
 def test_download_host_allowlist():
     _validate_download_url("https://pan.acgnai.top/model.zip")
+    _validate_download_url("https://cdn-lfs-cn-1.modelscope.cn/model.zip")
+    _validate_download_url("https://cdn-lfs-cn-12.modelscope.cn/model.zip")
     with pytest.raises(CommunityCatalogError, match="不受信任"):
         _validate_download_url("https://example.com/model.zip")
     with pytest.raises(CommunityCatalogError, match="不受信任"):
+        _validate_download_url("https://cdn-lfs-cn-1.modelscope.cn.example.com/model.zip")
+    with pytest.raises(CommunityCatalogError, match="不受信任"):
         _validate_download_url("http://pan.acgnai.top/model.zip")
+
+
+def test_install_creates_version_directory_before_atomic_move(tmp_path, monkeypatch):
+    archive = make_zip_bytes([
+        ("weights/voice.ckpt", b"gpt"),
+        ("weights/voice.pth", b"sovits"),
+        ("reference/ref.wav", b"audio"),
+    ])
+
+    class ImmediateThread:
+        def __init__(self, *, target, args, **_kwargs):
+            self.target = target
+            self.args = args
+
+        def start(self):
+            self.target(*self.args)
+
+    class FakeOpener:
+        def open(self, _request, timeout):
+            assert timeout == 60
+            return FakeDownloadResponse(archive)
+
+    manager = CommunityModelManager(tmp_path / "community", FakeCatalog())
+    monkeypatch.setattr(community_models_module, "threading", SimpleNamespace(Thread=ImmediateThread))
+    monkeypatch.setattr(community_models_module, "build_opener", lambda *_handlers: FakeOpener())
+
+    manager.install(CommunityInstallRequest(
+        category="原神", language="中文", modelName="测试角色", version="auto", licenseAccepted=True,
+    ))
+
+    job = manager.list_jobs()[0]
+    assert job.status == "completed"
+    assert job.installed_model is not None
+    install_path = Path(job.installed_model["installPath"])
+    assert install_path.parent == manager.installed_root / "auto"
+    assert (install_path / "weights" / "voice.ckpt").read_bytes() == b"gpt"
+    assert (install_path / "weights" / "voice.pth").read_bytes() == b"sovits"
+    assert (install_path / "langbai-model.json").is_file()

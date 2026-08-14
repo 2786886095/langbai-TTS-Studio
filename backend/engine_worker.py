@@ -8,6 +8,9 @@ import sys
 import traceback
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from engine_runtime import detect_gpt_sovits_version, has_override, recommended_gpt_sovits_sample_steps, resolve_torch_device
+
 
 PROTOCOL_OUT = sys.stdout
 sys.stdout = sys.stderr  # third-party model logging must not corrupt JSON-RPC stdout
@@ -161,25 +164,33 @@ def gpt_sovits_synthesize(text: str, output: Path, p: dict) -> None:
     if _model is None or key != _model_key:
         config = TTS_Config(str(config_path))
         for name in ("device", "is_half", "t2s_weights_path", "vits_weights_path", "bert_base_path", "cnhuhbert_base_path"):
-            if p.get(name) is not None:
+            if has_override(p.get(name)):
                 setattr(config, name, p[name])
+        config.device = resolve_torch_device(config.device)
+        if config.device == "cpu":
+            config.is_half = False
         config.update_configs()
         _model = TTS(config)
         _model_key = key
     mode = p.get("streaming_mode", 0)
     mode = int(mode) if not isinstance(mode, bool) else int(mode)
+    loaded_version = getattr(getattr(_model, "configs", None), "version", None)
+    resolved_version = detect_gpt_sovits_version(p, loaded_version)
+    version_sample_steps = recommended_gpt_sovits_sample_steps(resolved_version)
+    sample_steps = version_sample_steps if bool(p.get("sample_steps_auto", False)) else int(p.get("sample_steps", version_sample_steps))
+    super_sampling = bool(p.get("super_sampling", False)) and resolved_version == "v3"
     request = {
         "text": text, "text_lang": p.get("text_language", "auto"),
         "ref_audio_path": p.get("reference_audio"), "aux_ref_audio_paths": p.get("aux_reference_audios") or [],
         "prompt_text": p.get("prompt_text", ""), "prompt_lang": p.get("prompt_language", "auto"),
-        "top_k": int(p.get("top_k", 15)), "top_p": float(p.get("top_p", 1.0)),
+        "top_k": int(p.get("top_k", 15)), "top_p": float(p.get("top_p", 0.7)),
         "temperature": float(p.get("temperature", 1.0)), "text_split_method": p.get("text_split_method", "cut5"),
         "batch_size": int(p.get("batch_size", 1)), "batch_threshold": float(p.get("batch_threshold", 0.75)),
         "split_bucket": bool(p.get("split_bucket", True)), "speed_factor": float(p.get("speed_factor", 1.0)),
         "fragment_interval": float(p.get("fragment_interval", 0.3)), "seed": int(p.get("seed", -1)),
         "parallel_infer": bool(p.get("parallel_infer", True)),
         "repetition_penalty": float(p.get("repetition_penalty", 1.35)),
-        "sample_steps": int(p.get("sample_steps", 32)), "super_sampling": bool(p.get("super_sampling", False)),
+        "sample_steps": sample_steps, "super_sampling": super_sampling,
         "streaming_mode": mode in (2, 3), "return_fragment": bool(p.get("return_fragment", mode == 1)),
         "fixed_length_chunk": bool(p.get("fixed_length_chunk", mode == 3)), "overlap_length": int(p.get("overlap_length", 2)),
         "min_chunk_length": int(p.get("min_chunk_length", 16)),

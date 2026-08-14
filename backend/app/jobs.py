@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import queue
+import re
 import shutil
 import threading
 import uuid
@@ -10,13 +11,30 @@ from typing import Any
 
 from .adapters import EngineAdapter
 from .audio import merge_wav_files
-from .models import JobCreate, JobManifest, JobStatus, SegmentManifest, SegmentStatus, now_iso
+from .models import (
+    JobCreate, JobManifest, JobStatus, MultiSpeakerAssignmentManifest,
+    MultiSpeakerJobCreate, MultiSpeakerManifest, SegmentManifest, SegmentStatus, now_iso,
+)
+from .multi_speaker import parse_multi_speaker_script
 from .parameters import ENGINE_PARAMETERS, defaults_for
 from .segmenter import split_text
 from .storage import JobStore
+from .voices import GPT_VOICE_API_KEYS, VoiceProfileStore, gpt_voice_parameters_to_api
+from .workspace import WorkspaceError
 
 
 TEST_ONLY_PARAMETERS = {"mock_fail_segment_once", "mock_segment_delay_ms", "mock_sample_rate"}
+INTERNAL_PARAMETERS = {"gpt_sovits": {"sample_steps_auto"}}
+
+
+def title_from_text(text: str, limit: int = 36) -> str:
+    collapsed = re.sub(r"\s+", " ", text).strip()
+    collapsed = re.sub(r"^[，。！？、；：,.!?;:\-—_\s]+", "", collapsed)
+    if not collapsed:
+        return "语音任务"
+    first_sentence = re.split(r"[。！？!?\n]", collapsed, maxsplit=1)[0].strip()
+    candidate = first_sentence or collapsed
+    return candidate[:limit].rstrip("，。！？、；：,.!?;: -—_") or "语音任务"
 
 
 class EventBroker:
@@ -45,11 +63,14 @@ class EventBroker:
 
 
 class JobManager:
-    def __init__(self, store: JobStore, adapters: dict[str, EngineAdapter], *, mock_mode: bool = False):
+    def __init__(self, store: JobStore, adapters: dict[str, EngineAdapter], *, mock_mode: bool = False,
+                 voice_store: VoiceProfileStore | None = None):
         self.store = store
         self.adapters = adapters
         self.mock_mode = mock_mode
         self.events = EventBroker()
+        self.voice_store = voice_store
+        self.session_id = uuid.uuid4().hex
         self._queue: queue.Queue[str | None] = queue.Queue()
         self._cancelled: set[str] = set()
         self._thread: threading.Thread | None = None
@@ -60,16 +81,18 @@ class JobManager:
             return
         self._thread = threading.Thread(target=self._worker_loop, name="tts-job-worker", daemon=True)
         self._thread.start()
-        # Crash recovery: preserve completed segments and resume the rest.
-        for job in reversed(self.store.list()):
+        # A new application session starts with an empty queue. Interrupted work remains
+        # in history as cancelled and can still be retried explicitly.
+        for job in self.store.list():
             if job.status in (JobStatus.queued, JobStatus.running):
                 for segment in job.segments:
                     if segment.status == SegmentStatus.running:
-                        segment.status = SegmentStatus.pending
-                job.status = JobStatus.queued
+                        segment.status = SegmentStatus.failed
+                        segment.error = "软件已关闭"
+                job.status = JobStatus.cancelled
+                job.error = "上次软件关闭后已从生成队列清除，可在历史记录中重试"
                 job.updated_at = now_iso()
                 self.store.save(job)
-                self._queue.put(job.id)
 
     def close(self) -> None:
         self._queue.put(None)
@@ -82,6 +105,7 @@ class JobManager:
         if engine not in ENGINE_PARAMETERS:
             raise ValueError(f"不支持的引擎: {engine}")
         allowed = {item["name"] for item in ENGINE_PARAMETERS[engine]}
+        allowed |= INTERNAL_PARAMETERS.get(engine, set())
         if self.mock_mode:
             allowed |= TEST_ONLY_PARAMETERS
         unknown = sorted(set(supplied) - allowed)
@@ -106,21 +130,17 @@ class JobManager:
         if request.engine not in self.adapters:
             raise ValueError(f"引擎未配置: {request.engine}")
         parameters = self._validate_parameters(request.engine, request.params)
-        runtime_status = self.adapters[request.engine].status()
-        runtime_required = runtime_status.get("required_parameters") or []
-        runtime_missing = [name for name in runtime_required if parameters.get(name) in (None, "")]
-        if runtime_missing:
-            raise ValueError(
-                "当前托管引擎需要先明确选择参数: " + ", ".join(runtime_missing)
-            )
+        self._validate_runtime_requirements(request.engine, parameters)
         segments = split_text(request.text, request.long_audio.max_chars)
         if not segments:
             raise ValueError("文本不能为空")
         job_id = uuid.uuid4().hex
+        requested_title = (request.title or "").strip()
         job = JobManifest(
             id=job_id, engine=request.engine,
-            title=request.title or request.text.strip().replace("\n", " ")[:36],
+            title=requested_title if requested_title and requested_title not in {"未命名语音项目", "未命名语音任务"} else title_from_text(request.text),
             text=request.text, parameters=parameters, long_audio=request.long_audio,
+            session_id=self.session_id,
             segments=[SegmentManifest(id=f"{job_id}:{index}", index=index, text=text) for index, text in enumerate(segments)],
         )
         self.store.save(job)
@@ -128,13 +148,96 @@ class JobManager:
         self._emit(job, "job.created")
         return job
 
+    def create_multi_speaker(self, request: MultiSpeakerJobCreate) -> JobManifest:
+        if "gpt_sovits" not in self.adapters:
+            raise ValueError("GPT-SoVITS 引擎未配置")
+        if self.voice_store is None:
+            raise ValueError("角色声音资料库未配置")
+        parsed_lines, invalid_lines = parse_multi_speaker_script(request.script)
+        if invalid_lines:
+            line_text = "、".join(str(value) for value in invalid_lines[:20])
+            suffix = "等" if len(invalid_lines) > 20 else ""
+            raise ValueError(f"第 {line_text}{suffix} 行缺少有效的【角色名】：台词格式")
+        if not parsed_lines:
+            raise ValueError("多人剧本没有可生成的台词")
+
+        speaker_order = list(dict.fromkeys(line.speaker for line in parsed_lines))
+        resolved_assignments: dict[str, MultiSpeakerAssignmentManifest] = {}
+        for speaker in speaker_order:
+            assignment = request.assignments.get(speaker)
+            if assignment is None:
+                raise ValueError(f"角色【{speaker}】尚未匹配声音")
+            forbidden = sorted(set(assignment.params) & GPT_VOICE_API_KEYS)
+            if forbidden:
+                raise ValueError(
+                    f"角色【{speaker}】的推理预设不能覆盖声音模型与参考配置: {', '.join(forbidden)}"
+                )
+            try:
+                profile = self.voice_store.get(assignment.voice_profile_id)
+            except (ValueError, WorkspaceError) as exc:
+                raise ValueError(f"角色【{speaker}】选择的角色声音不存在") from exc
+            if profile.engine != "gpt_sovits":
+                raise ValueError(f"角色【{speaker}】只能使用 GPT-SoVITS 角色声音")
+            parameters = self._validate_parameters(
+                "gpt_sovits",
+                {**gpt_voice_parameters_to_api(profile.parameters), **assignment.params},
+            )
+            self._validate_runtime_requirements("gpt_sovits", parameters)
+            resolved_assignments[speaker] = MultiSpeakerAssignmentManifest(
+                voiceProfileId=profile.id,
+                voiceName=profile.name,
+                parameters=parameters,
+            )
+
+        job_id = uuid.uuid4().hex
+        segments: list[SegmentManifest] = []
+        for line in parsed_lines:
+            line_segments = split_text(line.text, request.long_audio.max_chars)
+            for text in line_segments:
+                index = len(segments)
+                segments.append(SegmentManifest(
+                    id=f"{job_id}:{index}", index=index, text=text,
+                    speaker=line.speaker, script_line_number=line.line_number,
+                ))
+        requested_title = (request.title or "").strip()
+        job = JobManifest(
+            id=job_id,
+            engine="gpt_sovits",
+            mode="multi_speaker",
+            title=requested_title if requested_title and requested_title not in {"未命名语音项目", "未命名语音任务"} else title_from_text(parsed_lines[0].text),
+            text=request.script,
+            parameters={},
+            long_audio=request.long_audio,
+            multi_speaker=MultiSpeakerManifest(
+                lineIntervalMs=request.line_interval_ms,
+                assignments=resolved_assignments,
+            ),
+            session_id=self.session_id,
+            segments=segments,
+        )
+        self.store.save(job)
+        self._queue.put(job_id)
+        self._emit(job, "job.created")
+        return job
+
+    def _validate_runtime_requirements(self, engine: str, parameters: dict[str, Any]) -> None:
+        runtime_status = self.adapters[engine].status()
+        runtime_required = runtime_status.get("required_parameters") or []
+        runtime_missing = [name for name in runtime_required if parameters.get(name) in (None, "")]
+        if runtime_missing:
+            raise ValueError("当前托管引擎需要先明确选择参数: " + ", ".join(runtime_missing))
+
     def list(self) -> list[JobManifest]:
+        return [job for job in self.store.list() if job.session_id == self.session_id]
+
+    def list_all(self) -> list[JobManifest]:
         return self.store.list()
 
     def get(self, job_id: str) -> JobManifest | None:
         return self.store.load(job_id)
 
     def cancel(self, job_id: str) -> JobManifest:
+        adapter_to_cancel: EngineAdapter | None = None
         with self._lock:
             job = self._require(job_id)
             if job.status in (JobStatus.completed, JobStatus.cancelled):
@@ -146,7 +249,11 @@ class JobManager:
                 job.updated_at = now_iso()
                 self.store.save(job)
                 self._emit(job, "job.cancelled")
-            return job
+            elif job.status == JobStatus.running:
+                adapter_to_cancel = self.adapters.get(job.engine)
+        if adapter_to_cancel is not None:
+            adapter_to_cancel.cancel_current()
+        return self._require(job_id)
 
     def retry(self, job_id: str) -> JobManifest:
         with self._lock:
@@ -161,12 +268,51 @@ class JobManager:
                     segment.error = None
             job.status = JobStatus.queued
             job.error = None
+            job.session_id = self.session_id
             job.output_path = None
             job.updated_at = now_iso()
             self.store.save(job)
             self._queue.put(job_id)
             self._emit(job, "job.retried")
             return job
+
+    def delete(self, job_id: str, *, delete_output: bool = False) -> dict[str, Any]:
+        from .library import UnsafeOutputPath, safe_output_path
+
+        with self._lock:
+            job = self._require(job_id)
+            if job.status in (JobStatus.queued, JobStatus.running):
+                raise ValueError("请先取消正在排队或生成中的任务")
+            try:
+                output = safe_output_path(self.store, job)
+            except UnsafeOutputPath as exc:
+                if delete_output:
+                    raise ValueError(f"为保护本地文件，未删除音频：{exc}") from exc
+                output = None
+            output_existed = bool(output and output.is_file())
+            preserved_path: str | None = None
+            if output_existed and output is not None:
+                if delete_output:
+                    output.unlink()
+                elif self.store.job_dir(job.id) in output.parents:
+                    destination_root = self.store.output_dir()
+                    if destination_root == self.store.job_dir(job.id) or self.store.job_dir(job.id) in destination_root.parents:
+                        destination_root = (self.store.root.parent / "output").resolve()
+                        destination_root.mkdir(parents=True, exist_ok=True)
+                    destination = self._available_output_path(destination_root, output.stem, output.suffix)
+                    shutil.move(str(output), str(destination))
+                    preserved_path = str(destination)
+                else:
+                    preserved_path = str(output)
+            self.store.delete(job_id)
+            self._cancelled.discard(job_id)
+            return {
+                "ok": True,
+                "id": job_id,
+                "recordDeleted": True,
+                "outputDeleted": bool(delete_output and output_existed),
+                "preservedOutputPath": preserved_path,
+            }
 
     def _require(self, job_id: str) -> JobManifest:
         job = self.store.load(job_id)
@@ -229,8 +375,12 @@ class JobManager:
                 self._emit(job, "segment.started")
                 try:
                     call_parameters = job.parameters
+                    if job.mode == "multi_speaker":
+                        if job.multi_speaker is None or not segment.speaker:
+                            raise RuntimeError("多人任务缺少角色映射")
+                        call_parameters = job.multi_speaker.assignments[segment.speaker].parameters
                     if self.mock_mode:
-                        call_parameters = {**job.parameters, "_segment_index": segment.index}
+                        call_parameters = {**call_parameters, "_segment_index": segment.index}
                     adapter.synthesize(segment.text, output, call_parameters)
                     segment.status = SegmentStatus.completed
                     segment.output_path = str(output)
@@ -238,6 +388,8 @@ class JobManager:
                     success = True
                     break
                 except Exception as exc:
+                    if job.id in self._cancelled:
+                        return self._finish_cancelled(job)
                     last_error = f"{type(exc).__name__}: {exc}"
                     segment.status = SegmentStatus.failed
                     segment.error = last_error
@@ -246,7 +398,10 @@ class JobManager:
                     self._emit(job, "segment.failed")
             if not success:
                 job.status = JobStatus.failed
-                job.error = f"第 {segment.index + 1} 段失败：{last_error}"
+                location = f"第 {segment.index + 1} 段"
+                if segment.speaker and segment.script_line_number:
+                    location = f"第 {segment.script_line_number} 行【{segment.speaker}】"
+                job.error = f"{location}失败：{last_error}"
                 job.progress = completed_count / total_segments
                 job.updated_at = now_iso()
                 self.store.save(job)
@@ -259,15 +414,27 @@ class JobManager:
             self._emit(job, "segment.completed")
         if job.id in self._cancelled:
             return self._finish_cancelled(job)
-        final_path = self.store.job_dir(job.id) / f"{job.title or job.id}.wav"
+        output_dir = self.store.output_dir()
+        final_path = output_dir / f"{job.title or job.id}.wav"
         invalid = '<>:"/\\|?*'
         safe_name = "".join("_" if char in invalid else char for char in final_path.name)
         final_path = final_path.with_name(safe_name)
+        final_path = self._available_output_path(output_dir, final_path.stem, final_path.suffix)
+        completed_segments = [segment for segment in job.segments if segment.output_path]
+        silence: int | list[int] = job.long_audio.silence_ms
+        if job.mode == "multi_speaker" and job.multi_speaker is not None:
+            silence = [
+                job.multi_speaker.line_interval_ms
+                if previous.script_line_number != current.script_line_number
+                else job.long_audio.silence_ms
+                for previous, current in zip(completed_segments, completed_segments[1:])
+            ]
         merge_wav_files(
-            [segment.output_path for segment in job.segments if segment.output_path], final_path,
-            sample_rate=job.long_audio.target_sample_rate, silence_ms=job.long_audio.silence_ms,
+            [segment.output_path for segment in completed_segments], final_path,
+            sample_rate=job.long_audio.target_sample_rate, silence_ms=silence,
         )
         job.output_path = str(final_path)
+        job.output_directory = str(output_dir)
         job.status = JobStatus.completed
         job.progress = 1.0
         job.updated_at = now_iso()
@@ -277,6 +444,18 @@ class JobManager:
                 segment.output_path = None
         self.store.save(job)
         self._emit(job, "job.completed")
+
+    @staticmethod
+    def _available_output_path(directory: Path, stem: str, suffix: str) -> Path:
+        candidate = directory / f"{stem}{suffix}"
+        if not candidate.exists():
+            return candidate
+        index = 2
+        while True:
+            candidate = directory / f"{stem} ({index}){suffix}"
+            if not candidate.exists():
+                return candidate
+            index += 1
 
     def _finish_cancelled(self, job: JobManifest) -> None:
         job.status = JobStatus.cancelled
