@@ -5,8 +5,9 @@ import {
 } from "lucide-react";
 import type { VoiceProfile } from "./VoiceProfiles";
 import {
-  parseMultiSpeakerScript,
+  MULTI_SPEAKER_QUALITY_PRESETS, parseMultiSpeakerScript,
   type MultiSpeakerAssignmentSelection,
+  type MultiSpeakerQualityPreset,
 } from "./multiSpeaker";
 
 type Preset = { id: string; name: string; parameters: Record<string, unknown> };
@@ -23,6 +24,8 @@ export function MultiSpeakerEditor({
   presets,
   lineIntervalMs,
   onLineIntervalChange,
+  qualityPreset,
+  onQualityPresetChange,
   onImport,
   onOpenVoices,
   onOpenParameters,
@@ -38,11 +41,13 @@ export function MultiSpeakerEditor({
   presets: Preset[];
   lineIntervalMs: number;
   onLineIntervalChange: (value: number) => void;
+  qualityPreset: MultiSpeakerQualityPreset;
+  onQualityPresetChange: (value: MultiSpeakerQualityPreset) => void;
   onImport: () => void;
   onOpenVoices: () => void;
   onOpenParameters: () => void;
 }) {
-  const [guideOpen, setGuideOpen] = useState(true);
+  const [guideOpen, setGuideOpen] = useState(false);
   const parsed = useMemo(() => parseMultiSpeakerScript(script), [script]);
   const unmapped = parsed.speakers.filter(speaker => !voices.some(voice => voice.id === assignments[speaker]?.voiceProfileId));
   const updateAssignment = (speaker: string, patch: Partial<MultiSpeakerAssignmentSelection>) => {
@@ -93,8 +98,11 @@ export function MultiSpeakerEditor({
       </article>
 
       <article className="multi-mapping-card">
-        <div className="multi-card-title"><span><UsersRound size={18} /></span><div><strong>角色声音映射</strong><small>声音决定模型与参考；预设只改变其他推理参数</small></div></div>
-        <div className="multi-global-setting"><label htmlFor="multi-line-interval">台词间隔</label><div><input id="multi-line-interval" type="number" min="0" max="10000" step="10" value={lineIntervalMs} onChange={event => onLineIntervalChange(Math.max(0, Math.min(10000, Number(event.target.value) || 0)))} /><span>ms</span></div></div>
+        <div className="multi-card-title"><span><UsersRound size={18} /></span><div><strong>角色声音映射</strong><small>质量策略统一稳定参数；角色预设负责其余参数</small></div></div>
+        <div className="multi-global-settings">
+          <label className="multi-quality-setting" htmlFor="multi-quality-preset"><span>质量策略</span><select id="multi-quality-preset" value={qualityPreset} onChange={event => onQualityPresetChange(event.target.value as MultiSpeakerQualityPreset)}>{MULTI_SPEAKER_QUALITY_PRESETS.map(option => <option key={option.id} value={option.id}>{option.name}</option>)}</select><small>{MULTI_SPEAKER_QUALITY_PRESETS.find(option => option.id === qualityPreset)?.description}</small></label>
+          <label className="multi-interval-setting" htmlFor="multi-line-interval"><span>台词间隔</span><div><input id="multi-line-interval" type="number" min="0" max="10000" step="10" value={lineIntervalMs} onChange={event => onLineIntervalChange(Math.max(0, Math.min(10000, Number(event.target.value) || 0)))} /><b>ms</b></div></label>
+        </div>
         {parsed.speakers.length === 0 ? <div className="multi-mapping-empty"><UserRoundCog size={24} /><strong>等待识别角色</strong><span>输入有效剧本后，角色会自动出现在这里。</span></div> : <div className="multi-role-list">{parsed.speakers.map(speaker => {
           const selected = assignments[speaker] ?? { voiceProfileId: "", presetId: "" };
           return <fieldset className="multi-role-row" key={speaker}><legend>【{speaker}】</legend><label><span>角色声音</span><select value={selected.voiceProfileId} onChange={event => updateAssignment(speaker, { voiceProfileId: event.target.value })}><option value="">请选择已保存声音</option>{voices.map(voice => <option key={voice.id} value={voice.id}>{voice.name}</option>)}</select></label><label><span>参数预设</span><select value={selected.presetId} onChange={event => updateAssignment(speaker, { presetId: event.target.value })}><option value="">使用当前推理参数</option>{presets.map(preset => <option key={preset.id} value={preset.id}>{preset.name}</option>)}</select></label></fieldset>;

@@ -3,3 +3,4 @@ uvicorn[standard]>=0.32,<1
 pydantic>=2.9,<3
 numpy>=1.26,<3
 soundfile>=0.12,<1
+soxr>=0.5,<1

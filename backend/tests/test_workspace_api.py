@@ -65,6 +65,7 @@ def test_multi_speaker_project_persists_role_mappings_and_rejects_other_engines(
             "params": {"top_p": 0.7},
             "multiSpeaker": {
                 "lineIntervalMs": 280,
+                "qualityPreset": "stable",
                 "assignments": {
                     "旁白": {"voiceProfileId": "voice-a", "presetId": "preset-a"},
                     "小明": {"voiceProfileId": "voice-b", "presetId": ""},
@@ -79,6 +80,7 @@ def test_multi_speaker_project_persists_role_mappings_and_rejects_other_engines(
 
         restored = client.get(f"/api/projects/{project['id']}")
         assert restored.status_code == 200
+        assert restored.json()["multiSpeaker"]["qualityPreset"] == "stable"
         assert restored.json()["multiSpeaker"]["assignments"]["旁白"]["presetId"] == "preset-a"
 
         rejected = client.post("/api/projects", json={**payload, "engine": "voxcpm"})

@@ -1,4 +1,15 @@
 export type CreationMode = "single" | "multi_speaker";
+export type MultiSpeakerQualityPreset = "stable" | "balanced" | "expressive";
+
+export const MULTI_SPEAKER_QUALITY_PRESETS: Array<{
+  id: MultiSpeakerQualityPreset;
+  name: string;
+  description: string;
+}> = [
+  { id: "stable", name: "稳定优先（推荐）", description: "固定角色音色并统一稳定参数，减少机械感与生硬断句" },
+  { id: "balanced", name: "自然平衡", description: "兼顾稳定、自然停顿与生成速度" },
+  { id: "expressive", name: "表现力优先", description: "保留更多情绪变化，波动风险略高" },
+];
 
 export type ParsedSpeakerLine = {
   lineNumber: number;
@@ -13,6 +24,7 @@ export type MultiSpeakerAssignmentSelection = {
 
 export type MultiSpeakerProjectSettings = {
   lineIntervalMs: number;
+  qualityPreset?: MultiSpeakerQualityPreset;
   assignments: Record<string, MultiSpeakerAssignmentSelection>;
 };
 

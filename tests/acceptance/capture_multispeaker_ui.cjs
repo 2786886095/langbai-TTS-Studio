@@ -8,6 +8,7 @@ const projectRoot = path.resolve(__dirname, "..", "..");
 const outputRoot = path.resolve(process.argv[2] || path.join(projectRoot, "docs", "audit", "multispeaker-current"));
 const distIndex = path.join(projectRoot, "frontend", "dist", "index.html");
 const backendUrl = process.env.LANGBAI_UI_BACKEND_URL || "http://127.0.0.1:18769";
+const USER_REPORTED_VIEWPORT = { width: 1316, height: 889 };
 const isolatedUserData = fs.mkdtempSync(path.join(os.tmpdir(), "langbai-multispeaker-ui-"));
 const isolatedBackendData = fs.mkdtempSync(path.join(os.tmpdir(), "langbai-multispeaker-backend-"));
 let backendProcess = null;
@@ -88,6 +89,20 @@ async function enterMultiSpeaker(window) {
   if (!switched) throw new Error("Multi-speaker mode button was not found");
   await settle(window);
   await window.webContents.executeJavaScript(`(() => {
+    const textarea = document.querySelector('.multi-script-card textarea');
+    if (!textarea) return false;
+    const speakers = ['旁白', '阿清', '澜沙', '船夫'];
+    const script = Array.from({ length: 161 }, (_, index) => {
+      const speaker = speakers[index % speakers.length];
+      return '【' + speaker + '】：这是第' + (index + 1) + '条独立台词，用于验证长篇多人剧本工作区。';
+    }).join('\\n');
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+    setter.call(textarea, script);
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  })()`);
+  await settle(window);
+  await window.webContents.executeJavaScript(`(() => {
     const selects = Array.from(document.querySelectorAll('.multi-role-row select'));
     selects.forEach((select, index) => {
       if (index % 2 !== 0 || select.options.length < 2) return;
@@ -126,11 +141,16 @@ async function metrics(window) {
       bodyClientHeight: document.body.clientHeight,
       bodyScrollHeight: document.body.scrollHeight,
       panel: rect('.multi-speaker-panel'),
+      focusBar: rect('.multi-focus-bar'),
       workspace: rect('.multi-speaker-workspace'),
       script: rect('.multi-script-card'),
       mapping: rect('.multi-mapping-card'),
       roles: visibleText,
       readiness: readiness ? { className: readiness.className, backgroundColor: getComputedStyle(readiness).backgroundColor, color: getComputedStyle(readiness).color, text: readiness.textContent.trim() } : null,
+      qualityPreset: document.querySelector('#multi-quality-preset')?.value || null,
+      qualityLabel: document.querySelector('#multi-quality-preset')?.selectedOptions?.[0]?.textContent || null,
+      engineStripVisible: Boolean(document.querySelector('.engine-strip')),
+      formatGuideVisible: Boolean(document.querySelector('.multi-format-guide')),
       undersizedText,
       undersizedTargets,
       generateDisabled: Boolean(document.querySelector('.top-actions .primary-button')?.disabled),
@@ -149,6 +169,7 @@ app.whenReady().then(async () => {
   await seedVoice("旁白 · 沉稳", 1);
   await seedVoice("小明 · 青年", 2);
   await seedVoice("小红 · 明快", 3);
+  await seedVoice("船夫 · 低沉", 4);
   const window = new BrowserWindow({
     show: false,
     useContentSize: true,
@@ -183,10 +204,22 @@ app.whenReady().then(async () => {
   report.wide = await metrics(window);
   await capture(window, "01-multispeaker-1920x1080.png");
 
+  window.setContentSize(USER_REPORTED_VIEWPORT.width, USER_REPORTED_VIEWPORT.height);
+  await settle(window);
+  report.userViewport = await metrics(window);
+  await capture(window, "02-multispeaker-1316x889.png");
+
+  await window.webContents.executeJavaScript("document.querySelector('.multi-focus-bar .secondary-button')?.click()");
+  await settle(window);
+  report.userViewportExpanded = await metrics(window);
+  await capture(window, "03-multispeaker-settings-expanded-1316x889.png");
+  await window.webContents.executeJavaScript("document.querySelector('.multi-focus-bar .secondary-button')?.click()");
+  await settle(window);
+
   window.setContentSize(1180, 720);
   await settle(window);
   report.minimum = await metrics(window);
-  await capture(window, "02-multispeaker-1180x720.png");
+  await capture(window, "04-multispeaker-1180x720.png");
 
   fs.writeFileSync(path.join(outputRoot, "multispeaker-metrics.json"), JSON.stringify(report, null, 2));
   window.destroy();
