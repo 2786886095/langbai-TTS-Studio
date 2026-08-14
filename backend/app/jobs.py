@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .adapters import EngineAdapter
-from .audio import merge_wav_files, prepare_tts_segment
+from .audio import LongSilenceError, merge_wav_files, prepare_tts_segment, repair_tts_long_silence
 from .models import (
     JobCreate, JobManifest, JobStatus, MultiSpeakerAssignmentManifest,
     MultiSpeakerJobCreate, MultiSpeakerManifest, SegmentManifest, SegmentStatus, now_iso,
@@ -417,9 +417,20 @@ class JobManager:
                             )
                     adapter.synthesize(segment.text, output, attempt_parameters)
                     if job.mode == "multi_speaker" and job.multi_speaker is not None:
-                        segment.quality = prepare_tts_segment(
-                            output, segment.text, quality_preset=job.multi_speaker.quality_preset
-                        )
+                        try:
+                            segment.quality = prepare_tts_segment(
+                                output, segment.text, quality_preset=job.multi_speaker.quality_preset
+                            )
+                        except LongSilenceError:
+                            if attempts_this_run <= job.long_audio.max_retries:
+                                raise
+                            repair = repair_tts_long_silence(
+                                output, quality_preset=job.multi_speaker.quality_preset
+                            )
+                            segment.quality = prepare_tts_segment(
+                                output, segment.text, quality_preset=job.multi_speaker.quality_preset
+                            )
+                            segment.quality.update(repair)
                     segment.status = SegmentStatus.completed
                     segment.output_path = str(output)
                     segment.error = None
@@ -471,6 +482,10 @@ class JobManager:
             [segment.output_path for segment in completed_segments], final_path,
             sample_rate=job.long_audio.target_sample_rate, silence_ms=silence,
         )
+        if job.mode == "multi_speaker" and job.multi_speaker is not None:
+            repair_tts_long_silence(
+                final_path, quality_preset=job.multi_speaker.quality_preset
+            )
         job.output_path = str(final_path)
         job.output_directory = str(output_dir)
         job.status = JobStatus.completed

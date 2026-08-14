@@ -1,7 +1,7 @@
 import numpy as np
 import soundfile as sf
 
-from app.audio import merge_wav_files, prepare_tts_segment
+from app.audio import LongSilenceError, compress_long_silences, merge_wav_files, prepare_tts_segment
 from app.workspace import ProjectCreate
 
 
@@ -51,6 +51,40 @@ def test_generated_segment_trims_only_abnormal_edge_silence(tmp_path):
     assert report["trimmedLeadingMs"] >= 370
     assert report["trimmedTrailingMs"] >= 2700
     assert sf.info(path).duration < 2.4
+
+
+def test_generated_segment_rejects_abnormal_internal_silence(tmp_path):
+    sample_rate = 16_000
+    tone = 0.15 * np.sin(2 * np.pi * 220 * np.arange(sample_rate) / sample_rate)
+    audio = np.concatenate([tone, np.zeros(sample_rate * 3), tone])
+    path = tmp_path / "internal-silence.wav"
+    sf.write(path, audio, sample_rate)
+
+    try:
+        prepare_tts_segment(path, "前半句说完以后，后半句继续。", quality_preset="stable")
+    except LongSilenceError as exc:
+        assert "异常长静音" in str(exc)
+    else:
+        raise AssertionError("internal long silence was not rejected")
+
+
+def test_streaming_silence_repair_preserves_short_pauses_and_compresses_long_ones(tmp_path):
+    sample_rate = 16_000
+    tone = 0.15 * np.sin(2 * np.pi * 220 * np.arange(sample_rate // 2) / sample_rate)
+    audio = np.concatenate([
+        tone, np.zeros(sample_rate), tone, np.zeros(sample_rate * 3), tone,
+    ])
+    source = tmp_path / "long-pause.wav"
+    output = tmp_path / "repaired.wav"
+    sf.write(source, audio, sample_rate)
+
+    report = compress_long_silences(
+        source, output, threshold_db=-50, trigger_ms=1800, keep_ms=650,
+    )
+
+    assert report["compressedSilenceCount"] == 1
+    assert report["removedSilenceMs"] == 2350
+    assert abs(sf.info(output).duration - 3.15) < 0.03
 
 
 def test_hq_resampler_suppresses_frequencies_above_target_nyquist(tmp_path):

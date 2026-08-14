@@ -36,6 +36,20 @@ class QualityRetryAdapter(MockAdapter):
         sf.write(output_path, 0.15 * np.sin(2 * math.pi * 220 * t), sample_rate)
 
 
+class PersistentLongSilenceAdapter(MockAdapter):
+    def __init__(self):
+        super().__init__("gpt_sovits")
+        self.seeds: list[int] = []
+
+    def synthesize(self, text: str, output_path: Path, parameters: dict) -> None:
+        self.seeds.append(int(parameters["seed"]))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        sample_rate = 16_000
+        t = np.arange(sample_rate, dtype=np.float32) / sample_rate
+        tone = 0.15 * np.sin(2 * math.pi * 220 * t)
+        sf.write(output_path, np.concatenate([tone, np.zeros(sample_rate * 3), tone]), sample_rate)
+
+
 def wait_completed(client: TestClient, job_id: str) -> dict:
     for _ in range(200):
         payload = client.get(f"/api/jobs/{job_id}").json()
@@ -202,3 +216,27 @@ def test_quality_gate_retries_silent_segment_with_a_new_seed(tmp_path):
         assert len(adapter.seeds) == 2
         assert adapter.seeds[0] != adapter.seeds[1]
         assert completed["segments"][0]["quality"]["durationSeconds"] == 2.0
+
+
+def test_persistent_internal_silence_is_retried_then_safely_compressed(tmp_path):
+    adapter = PersistentLongSilenceAdapter()
+    app = create_app(
+        adapters={"gpt_sovits": adapter}, data_dir=tmp_path / "data", mock_mode=True,
+    )
+    with TestClient(app) as client:
+        actor_id = create_voice(client, tmp_path, "长静音声线")
+        response = client.post("/api/jobs/multi-speaker", json={
+            "script": "【角色】：前半句结束后还要继续说后半句。",
+            "qualityPreset": "stable",
+            "longAudio": {"maxRetries": 1, "targetSampleRate": 16000},
+            "assignments": {"角色": {"voiceProfileId": actor_id}},
+        })
+        assert response.status_code == 202, response.text
+        completed = wait_completed(client, response.json()["id"])
+        segment = completed["segments"][0]
+        assert segment["attempts"] == 2
+        assert len(adapter.seeds) == 2
+        assert adapter.seeds[0] != adapter.seeds[1]
+        assert segment["quality"]["compressedSilenceCount"] == 1
+        assert segment["quality"]["removedSilenceMs"] == 2350
+        assert sf.info(completed["output_path"]).duration < 2.7
