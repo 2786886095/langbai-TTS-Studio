@@ -164,10 +164,23 @@ def test_stable_quality_preset_overrides_risky_parameters_and_reuses_role_seed(t
         assert {call["seed"] for call in adapter.calls} == {adapter.calls[0]["seed"]}
         assert adapter.calls[0]["seed"] > 0
         assert adapter.calls[0]["temperature"] == 0.75
-        assert adapter.calls[0]["speed_factor"] == 1.0
+        assert adapter.calls[0]["speed_factor"] == 1.1
         assert adapter.calls[0]["text_split_method"] == "cut5"
         assert adapter.calls[0]["parallel_infer"] is True
         assert all(segment["quality"]["preset"] == "stable" for segment in completed["segments"])
+
+
+def test_all_quality_presets_use_1_1_speed():
+    from app.jobs import MULTI_SPEAKER_QUALITY_PARAMETERS
+
+    assert {
+        preset: parameters["speed_factor"]
+        for preset, parameters in MULTI_SPEAKER_QUALITY_PARAMETERS.items()
+    } == {
+        "stable": 1.1,
+        "balanced": 1.1,
+        "expressive": 1.1,
+    }
 
 
 def test_quality_gate_retries_silent_segment_with_a_new_seed(tmp_path):

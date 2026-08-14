@@ -30,17 +30,17 @@ INTERNAL_PARAMETERS = {"gpt_sovits": {"sample_steps_auto"}}
 MULTI_SPEAKER_QUALITY_PARAMETERS = {
     "stable": {
         "temperature": 0.75,
-        "text_split_method": "cut5", "speed_factor": 1.0,
+        "text_split_method": "cut5", "speed_factor": 1.1,
         "fragment_interval": 0.18, "parallel_infer": True,
     },
     "balanced": {
         "temperature": 0.9,
-        "text_split_method": "cut5", "speed_factor": 1.0,
+        "text_split_method": "cut5", "speed_factor": 1.1,
         "fragment_interval": 0.22, "parallel_infer": True,
     },
     "expressive": {
         "temperature": 1.05,
-        "text_split_method": "cut5", "speed_factor": 1.0,
+        "text_split_method": "cut5", "speed_factor": 1.1,
         "fragment_interval": 0.28, "parallel_infer": True,
     },
 }
