@@ -67,6 +67,9 @@ def _job_payload(job) -> dict:
     # Keep stable manifest names while also serving the Electron camelCase contract.
     data["params"] = data["parameters"]
     data["longAudio"] = job.long_audio.model_dump(mode="json", by_alias=True)
+    data["multiSpeaker"] = (
+        job.multi_speaker.model_dump(mode="json", by_alias=True) if job.multi_speaker else None
+    )
     data["outputPath"] = data["output_path"]
     return data
 

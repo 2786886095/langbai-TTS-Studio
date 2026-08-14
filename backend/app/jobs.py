@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import queue
 import re
 import shutil
@@ -10,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .adapters import EngineAdapter
-from .audio import merge_wav_files
+from .audio import merge_wav_files, prepare_tts_segment
 from .models import (
     JobCreate, JobManifest, JobStatus, MultiSpeakerAssignmentManifest,
     MultiSpeakerJobCreate, MultiSpeakerManifest, SegmentManifest, SegmentStatus, now_iso,
@@ -25,6 +26,29 @@ from .workspace import WorkspaceError
 
 TEST_ONLY_PARAMETERS = {"mock_fail_segment_once", "mock_segment_delay_ms", "mock_sample_rate"}
 INTERNAL_PARAMETERS = {"gpt_sovits": {"sample_steps_auto"}}
+
+MULTI_SPEAKER_QUALITY_PARAMETERS = {
+    "stable": {
+        "temperature": 0.75,
+        "text_split_method": "cut5", "speed_factor": 1.0,
+        "fragment_interval": 0.18, "parallel_infer": True,
+    },
+    "balanced": {
+        "temperature": 0.9,
+        "text_split_method": "cut5", "speed_factor": 1.0,
+        "fragment_interval": 0.22, "parallel_infer": True,
+    },
+    "expressive": {
+        "temperature": 1.05,
+        "text_split_method": "cut5", "speed_factor": 1.0,
+        "fragment_interval": 0.28, "parallel_infer": True,
+    },
+}
+
+
+def _stable_voice_seed(voice_profile_id: str, speaker: str) -> int:
+    digest = hashlib.blake2s(f"{voice_profile_id}:{speaker}".encode("utf-8"), digest_size=4).digest()
+    return max(1, int.from_bytes(digest, "big") & 0x7FFFFFFF)
 
 
 def title_from_text(text: str, limit: int = 36) -> str:
@@ -182,6 +206,8 @@ class JobManager:
                 "gpt_sovits",
                 {**gpt_voice_parameters_to_api(profile.parameters), **assignment.params},
             )
+            parameters.update(MULTI_SPEAKER_QUALITY_PARAMETERS[request.quality_preset])
+            parameters["seed"] = _stable_voice_seed(profile.id, speaker)
             self._validate_runtime_requirements("gpt_sovits", parameters)
             resolved_assignments[speaker] = MultiSpeakerAssignmentManifest(
                 voiceProfileId=profile.id,
@@ -210,6 +236,7 @@ class JobManager:
             long_audio=request.long_audio,
             multi_speaker=MultiSpeakerManifest(
                 lineIntervalMs=request.line_interval_ms,
+                qualityPreset=request.quality_preset,
                 assignments=resolved_assignments,
             ),
             session_id=self.session_id,
@@ -381,7 +408,18 @@ class JobManager:
                         call_parameters = job.multi_speaker.assignments[segment.speaker].parameters
                     if self.mock_mode:
                         call_parameters = {**call_parameters, "_segment_index": segment.index}
-                    adapter.synthesize(segment.text, output, call_parameters)
+                    attempt_parameters = dict(call_parameters)
+                    if job.mode == "multi_speaker" and job.multi_speaker is not None:
+                        base_seed = int(attempt_parameters.get("seed", -1))
+                        if base_seed >= 0 and attempts_this_run > 1:
+                            attempt_parameters["seed"] = max(
+                                1, (base_seed + (attempts_this_run - 1) * 104_729) % 2_147_483_647
+                            )
+                    adapter.synthesize(segment.text, output, attempt_parameters)
+                    if job.mode == "multi_speaker" and job.multi_speaker is not None:
+                        segment.quality = prepare_tts_segment(
+                            output, segment.text, quality_preset=job.multi_speaker.quality_preset
+                        )
                     segment.status = SegmentStatus.completed
                     segment.output_path = str(output)
                     segment.error = None

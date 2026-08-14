@@ -1,11 +1,39 @@
 import time
+import math
 from pathlib import Path
 
+import numpy as np
 import soundfile as sf
 from fastapi.testclient import TestClient
 
 from app.adapters.mock import MockAdapter
 from app.main import create_app
+
+
+class RecordingAdapter(MockAdapter):
+    def __init__(self):
+        super().__init__("gpt_sovits")
+        self.calls: list[dict] = []
+
+    def synthesize(self, text: str, output_path: Path, parameters: dict) -> None:
+        self.calls.append(dict(parameters))
+        super().synthesize(text, output_path, parameters)
+
+
+class QualityRetryAdapter(MockAdapter):
+    def __init__(self):
+        super().__init__("gpt_sovits")
+        self.seeds: list[int] = []
+
+    def synthesize(self, text: str, output_path: Path, parameters: dict) -> None:
+        self.seeds.append(int(parameters["seed"]))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        sample_rate = 16_000
+        if len(self.seeds) == 1:
+            sf.write(output_path, np.zeros(sample_rate, dtype=np.float32), sample_rate)
+            return
+        t = np.arange(sample_rate * 2, dtype=np.float32) / sample_rate
+        sf.write(output_path, 0.15 * np.sin(2 * math.pi * 220 * t), sample_rate)
 
 
 def wait_completed(client: TestClient, job_id: str) -> dict:
@@ -112,3 +140,52 @@ def test_multi_speaker_rejects_missing_mapping_and_voice_overrides(tmp_path):
         })
         assert override.status_code == 400
         assert "不能覆盖声音模型与参考配置" in override.json()["detail"]
+
+
+def test_stable_quality_preset_overrides_risky_parameters_and_reuses_role_seed(tmp_path):
+    adapter = RecordingAdapter()
+    app = create_app(
+        adapters={"gpt_sovits": adapter}, data_dir=tmp_path / "data", mock_mode=True,
+    )
+    with TestClient(app) as client:
+        actor_id = create_voice(client, tmp_path, "稳定声线")
+        response = client.post("/api/jobs/multi-speaker", json={
+            "script": "【角色】：第一句。\n【角色】：第二句。",
+            "qualityPreset": "stable",
+            "assignments": {"角色": {"voiceProfileId": actor_id, "params": {
+                "temperature": 1.6, "speed_factor": 1.2,
+                "text_split_method": "cut5", "seed": -1,
+            }}},
+        })
+        assert response.status_code == 202, response.text
+        completed = wait_completed(client, response.json()["id"])
+        assert completed["multiSpeaker"]["qualityPreset"] == "stable"
+        assert len(adapter.calls) == 2
+        assert {call["seed"] for call in adapter.calls} == {adapter.calls[0]["seed"]}
+        assert adapter.calls[0]["seed"] > 0
+        assert adapter.calls[0]["temperature"] == 0.75
+        assert adapter.calls[0]["speed_factor"] == 1.0
+        assert adapter.calls[0]["text_split_method"] == "cut5"
+        assert adapter.calls[0]["parallel_infer"] is True
+        assert all(segment["quality"]["preset"] == "stable" for segment in completed["segments"])
+
+
+def test_quality_gate_retries_silent_segment_with_a_new_seed(tmp_path):
+    adapter = QualityRetryAdapter()
+    app = create_app(
+        adapters={"gpt_sovits": adapter}, data_dir=tmp_path / "data", mock_mode=True,
+    )
+    with TestClient(app) as client:
+        actor_id = create_voice(client, tmp_path, "重试声线")
+        response = client.post("/api/jobs/multi-speaker", json={
+            "script": "【角色】：这一句话用于验证异常静音自动重试。",
+            "qualityPreset": "stable",
+            "longAudio": {"maxRetries": 2},
+            "assignments": {"角色": {"voiceProfileId": actor_id}},
+        })
+        assert response.status_code == 202, response.text
+        completed = wait_completed(client, response.json()["id"])
+        assert completed["segments"][0]["attempts"] == 2
+        assert len(adapter.seeds) == 2
+        assert adapter.seeds[0] != adapter.seeds[1]
+        assert completed["segments"][0]["quality"]["durationSeconds"] == 2.0

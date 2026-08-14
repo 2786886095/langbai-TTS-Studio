@@ -76,6 +76,9 @@ class MultiSpeakerJobCreate(BaseModel):
     script: str = Field(min_length=1)
     assignments: dict[str, MultiSpeakerAssignmentCreate] = Field(min_length=1)
     line_interval_ms: int = Field(default=280, alias="lineIntervalMs", ge=0, le=10_000)
+    quality_preset: Literal["stable", "balanced", "expressive"] = Field(
+        default="stable", alias="qualityPreset"
+    )
     long_audio: LongAudioOptions = Field(default_factory=LongAudioOptions, alias="longAudio")
     title: str | None = None
 
@@ -100,6 +103,9 @@ class MultiSpeakerManifest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     line_interval_ms: int = Field(default=280, alias="lineIntervalMs", ge=0, le=10_000)
+    quality_preset: Literal["stable", "balanced", "expressive"] = Field(
+        default="stable", alias="qualityPreset"
+    )
     assignments: dict[str, MultiSpeakerAssignmentManifest]
 
 
@@ -112,6 +118,7 @@ class SegmentManifest(BaseModel):
     output_path: str | None = None
     speaker: str | None = None
     script_line_number: int | None = None
+    quality: dict[str, Any] | None = None
     error: str | None = None
 
 

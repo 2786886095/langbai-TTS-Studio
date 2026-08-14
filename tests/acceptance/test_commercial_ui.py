@@ -88,8 +88,30 @@ def test_gpt_multi_speaker_flow_and_voice_isolation_are_reachable(project_root: 
     assert "/api/jobs/multi-speaker" in app_source and "creationMode" in app_source
     assert "【旁白】：" in editor_source and "invalidLines" in editor_source
     assert "voiceProfileId" in editor_source and "presetId" in editor_source
+    assert "稳定优先（推荐）" in helper_source and "qualityPreset" in app_source
     assert "withoutGptVoiceParameters" in helper_source and "GPT_VOICE_PARAMETER_KEYS" in helper_source
     assert "grid-template-columns: 1fr" in styles and ".multi-speaker-workspace" in styles
+
+
+def test_multi_speaker_focus_workspace_defaults_to_more_editing_space(project_root: Path, commercial_release: bool) -> None:
+    require_commercial_gate(commercial_release)
+    app_source = (project_root / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")
+    editor_source = (project_root / "frontend" / "src" / "MultiSpeakerEditor.tsx").read_text(encoding="utf-8")
+    styles = (project_root / "frontend" / "src" / "styles.css").read_text(encoding="utf-8")
+    assert 'useState(false)' in app_source and "multiChromeExpanded" in app_source
+    assert "展开顶部设置" in app_source and "收起顶部设置" in app_source
+    assert "const [guideOpen, setGuideOpen] = useState(false)" in editor_source
+    assert ".multi-focus-bar" in styles
+
+
+def test_multi_speaker_quality_pipeline_is_wired_for_release(project_root: Path, commercial_release: bool) -> None:
+    require_commercial_gate(commercial_release)
+    jobs_source = (project_root / "backend" / "app" / "jobs.py").read_text(encoding="utf-8")
+    audio_source = (project_root / "backend" / "app" / "audio.py").read_text(encoding="utf-8")
+    requirements = (project_root / "backend" / "requirements.txt").read_text(encoding="utf-8")
+    assert "_stable_voice_seed" in jobs_source and "MULTI_SPEAKER_QUALITY_PARAMETERS" in jobs_source
+    assert "prepare_tts_segment" in jobs_source and "SegmentQualityError" in audio_source
+    assert "soxr.resample" in audio_source and "soxr" in requirements
 
 
 def test_every_editable_field_has_native_right_click_edit_menu(project_root: Path, commercial_release: bool) -> None:
