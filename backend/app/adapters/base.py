@@ -26,3 +26,7 @@ class EngineAdapter(ABC):
     def cancel_current(self) -> None:
         """Interrupt the inference currently owned by this adapter, if any."""
         pass
+
+    def spawn_parallel_worker(self, worker_index: int) -> "EngineAdapter | None":
+        """Create an isolated inference worker, or return None when unsupported."""
+        return None

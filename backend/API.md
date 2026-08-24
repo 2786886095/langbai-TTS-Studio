@@ -73,6 +73,7 @@ GPT-SoVITS 多人项目使用 `mode: "multi_speaker"`，并在 `multiSpeaker` �
   "title": "双人对白",
   "script": "【旁白】：开始。\n【小明】：你好。",
   "lineIntervalMs": 280,
+  "aggressiveConcurrency": true,
   "assignments": {
     "旁白": {"voiceProfileId": "...", "params": {"top_p": 0.7}},
     "小明": {"voiceProfileId": "...", "params": {"top_p": 0.65}}
@@ -81,7 +82,7 @@ GPT-SoVITS 多人项目使用 `mode: "multi_speaker"`，并在 `multiSpeaker` �
 }
 ```
 
-接口只接受 GPT-SoVITS 角色声音。`params` 仅允许推理参数，不能覆盖角色声音中的 GPT/SoVITS 权重、参考音频、参考文本、参考语言或版本。每个物理台词行保持独立；行内若因长文本再次分段，内部使用 `longAudio.silenceMs`，跨台词行使用 `lineIntervalMs`。成功返回 `202` 和普通任务清单，可继续使用现有查询、取消、重试、试听与定位接口。
+接口只接受 GPT-SoVITS 角色声音。`params` 仅允许推理参数，不能覆盖角色声音中的 GPT/SoVITS 权重、参考音频、参考文本、参考语言或版本。`aggressiveConcurrency` 默认为 `true`：10GB 以上 NVIDIA 显卡会尝试至少双 Worker和 98% 显存上限；任一 Worker 发生 CUDA OOM 时自动退回单 Worker续作。每个物理台词行保持独立；行内若因长文本再次分段，内部使用 `longAudio.silenceMs`，跨台词行使用 `lineIntervalMs`。成功返回 `202` 和普通任务清单，可继续使用现有查询、取消、重试、试听与定位接口。
 
 ## 全局设置
 

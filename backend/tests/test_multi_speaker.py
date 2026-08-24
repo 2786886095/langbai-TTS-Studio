@@ -1,5 +1,6 @@
 import time
 import math
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -8,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from app.adapters.mock import MockAdapter
 from app.main import create_app
+from app.gpu_scheduler import GpuSnapshot
 
 
 class RecordingAdapter(MockAdapter):
@@ -48,6 +50,54 @@ class PersistentLongSilenceAdapter(MockAdapter):
         t = np.arange(sample_rate, dtype=np.float32) / sample_rate
         tone = 0.15 * np.sin(2 * math.pi * 220 * t)
         sf.write(output_path, np.concatenate([tone, np.zeros(sample_rate * 3), tone]), sample_rate)
+
+
+class ParallelState:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.active = 0
+        self.max_active = 0
+        self.calls: list[tuple[str, str]] = []
+
+
+class ParallelAdapter(MockAdapter):
+    def __init__(self, state: ParallelState, label: str = "primary", *, oom=False):
+        super().__init__("gpt_sovits")
+        self.state = state
+        self.label = label
+        self.oom = oom
+
+    def spawn_parallel_worker(self, worker_index: int):
+        return ParallelAdapter(self.state, f"worker-{worker_index}", oom=self.oom)
+
+    def synthesize(self, text: str, output_path: Path, parameters: dict) -> None:
+        if self.oom and self.label != "primary":
+            with self.state.lock:
+                self.state.calls.append((self.label, text))
+            raise RuntimeError("torch.OutOfMemoryError: CUDA out of memory")
+        with self.state.lock:
+            self.state.active += 1
+            self.state.max_active = max(self.state.max_active, self.state.active)
+            self.state.calls.append((self.label, text))
+        try:
+            time.sleep(0.04)
+            super().synthesize(text, output_path, parameters)
+        finally:
+            with self.state.lock:
+                self.state.active -= 1
+
+
+def roomy_gpu_snapshots():
+    rows = iter([
+        GpuSnapshot(0, "RTX Test 24GB", 24_576, 2_000, 8, 50),
+        GpuSnapshot(0, "RTX Test 24GB", 24_576, 6_500, 12, 56),
+    ])
+    last = GpuSnapshot(0, "RTX Test 24GB", 24_576, 6_500, 40, 60)
+
+    def read():
+        return next(rows, last)
+
+    return read
 
 
 def wait_completed(client: TestClient, job_id: str) -> dict:
@@ -240,3 +290,99 @@ def test_persistent_internal_silence_is_retried_then_safely_compressed(tmp_path)
         assert segment["quality"]["compressedSilenceCount"] == 1
         assert segment["quality"]["removedSilenceMs"] == 2350
         assert sf.info(completed["output_path"]).duration < 2.7
+
+
+def test_multi_speaker_adaptive_workers_generate_concurrently_and_merge_in_script_order(tmp_path):
+    state = ParallelState()
+    app = create_app(
+        adapters={"gpt_sovits": ParallelAdapter(state)},
+        data_dir=tmp_path / "data",
+        mock_mode=True,
+    )
+    app.state.manager.gpu_snapshot_provider = roomy_gpu_snapshots()
+    with TestClient(app) as client:
+        voices = {
+            role: create_voice(client, tmp_path, f"{role}声线")
+            for role in ("甲", "乙", "丙")
+        }
+        response = client.post("/api/jobs/multi-speaker", json={
+            "script": "\n".join([
+                "【甲】：甲一。", "【乙】：乙一。", "【丙】：丙一。",
+                "【甲】：甲二。", "【乙】：乙二。", "【丙】：丙二。",
+            ]),
+            "longAudio": {"targetSampleRate": 16000, "silenceMs": 0},
+            "assignments": {
+                role: {"voiceProfileId": voice, "params": {"mock_sample_rate": 16000}}
+                for role, voice in voices.items()
+            },
+        })
+        assert response.status_code == 202, response.text
+        completed = wait_completed(client, response.json()["id"])
+        scheduling = completed["multiSpeaker"]
+        assert scheduling["aggressiveConcurrency"] is True
+        assert scheduling["schedulingMode"] == "aggressive_gpu"
+        assert scheduling["plannedWorkers"] == 3
+        assert scheduling["maxWorkersUsed"] == 3
+        assert scheduling["activeWorkers"] == 0
+        assert scheduling["gpuName"] == "RTX Test 24GB"
+        assert state.max_active >= 2
+        assert [segment["index"] for segment in completed["segments"]] == list(range(6))
+        assert [Path(segment["output_path"]).name for segment in completed["segments"]] == [
+            f"{index:04d}.wav" for index in range(1, 7)
+        ]
+        assert sf.info(completed["output_path"]).frames == 6 * 1280 + 5 * 4480
+
+
+def test_parallel_cuda_oom_retires_clone_and_continues_on_primary(tmp_path):
+    state = ParallelState()
+    app = create_app(
+        adapters={"gpt_sovits": ParallelAdapter(state, oom=True)},
+        data_dir=tmp_path / "data",
+        mock_mode=True,
+    )
+    app.state.manager.gpu_snapshot_provider = roomy_gpu_snapshots()
+    with TestClient(app) as client:
+        voices = {
+            role: create_voice(client, tmp_path, f"{role}回退声线")
+            for role in ("甲", "乙")
+        }
+        response = client.post("/api/jobs/multi-speaker", json={
+            "script": "【甲】：第一句。\n【乙】：第二句。\n【甲】：第三句。\n【乙】：第四句。",
+            "longAudio": {"targetSampleRate": 16000, "silenceMs": 0, "maxRetries": 0},
+            "assignments": {
+                role: {"voiceProfileId": voice, "params": {"mock_sample_rate": 16000}}
+                for role, voice in voices.items()
+            },
+        })
+        assert response.status_code == 202, response.text
+        completed = wait_completed(client, response.json()["id"])
+        assert completed["multiSpeaker"]["plannedWorkers"] == 2
+        assert "退回单 Worker" in completed["multiSpeaker"]["schedulerDetail"]
+        assert all(segment["status"] == "completed" for segment in completed["segments"])
+        assert any(label.startswith("worker-") for label, _ in state.calls)
+        assert sum(label == "primary" for label, _ in state.calls) >= 3
+
+
+def test_single_worker_groups_roles_to_avoid_reloading_weights_for_every_line(tmp_path):
+    adapter = RecordingAdapter()
+    app = create_app(
+        adapters={"gpt_sovits": adapter}, data_dir=tmp_path / "data", mock_mode=True,
+    )
+    app.state.manager.gpu_snapshot_provider = lambda: None
+    with TestClient(app) as client:
+        first_voice = create_voice(client, tmp_path, "甲分组声线")
+        second_voice = create_voice(client, tmp_path, "乙分组声线")
+        response = client.post("/api/jobs/multi-speaker", json={
+            "script": "【甲】：甲一。\n【乙】：乙一。\n【甲】：甲二。\n【乙】：乙二。",
+            "assignments": {
+                "甲": {"voiceProfileId": first_voice},
+                "乙": {"voiceProfileId": second_voice},
+            },
+        })
+        assert response.status_code == 202, response.text
+        completed = wait_completed(client, response.json()["id"])
+        generated_weight_order = [Path(call["t2s_weights_path"]).name for call in adapter.calls]
+        assert generated_weight_order == [
+            "甲分组声线.ckpt", "甲分组声线.ckpt", "乙分组声线.ckpt", "乙分组声线.ckpt",
+        ]
+        assert [segment["speaker"] for segment in completed["segments"]] == ["甲", "乙", "甲", "乙"]

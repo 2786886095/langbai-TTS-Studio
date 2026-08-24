@@ -22,7 +22,7 @@ import {
   MULTI_SPEAKER_QUALITY_PRESETS, type MultiSpeakerProjectSettings, type MultiSpeakerQualityPreset,
 } from "./multiSpeaker";
 
-type Job = { id: string; title: string; engine: EngineId; progress: number; status: "running" | "queued" | "failed" | "cancelled" | "done"; segments: string; duration?: string; outputPath?: string };
+type Job = { id: string; title: string; engine: EngineId; progress: number; status: "running" | "queued" | "failed" | "cancelled" | "done"; segments: string; duration?: string; outputPath?: string; acceleration?: string };
 type ApiEngineStatus = { id?: string; name?: string; state?: string; available?: boolean };
 type AppSettings = { defaultEngine?: string; autoRevealOutput?: boolean; updateChannel?: "stable" | "beta" };
 type UpdateEvent = { state: "checking" | "available" | "current" | "downloading" | "downloaded" | "error"; info?: { version?: string }; progress?: { percent?: number; bytesPerSecond?: number }; message?: string };
@@ -89,11 +89,16 @@ function normalizeJob(raw: Record<string, unknown>): Job {
   const engine = (["indextts2", "voxcpm", "gpt_sovits"].includes(String(raw.engine)) ? raw.engine : "indextts2") as EngineId;
   const statusValue = String(raw.status ?? "queued");
   const output = raw.output && typeof raw.output === "object" ? raw.output as Record<string, unknown> : {};
+  const multiSpeaker = raw.multiSpeaker && typeof raw.multiSpeaker === "object" ? raw.multiSpeaker as Record<string, unknown> : raw.multi_speaker && typeof raw.multi_speaker === "object" ? raw.multi_speaker as Record<string, unknown> : {};
+  const activeWorkers = Number(multiSpeaker.activeWorkers ?? multiSpeaker.active_workers ?? 0);
+  const maxWorkers = Number(multiSpeaker.maxWorkersUsed ?? multiSpeaker.max_workers_used ?? 0);
+  const workers = statusValue === "running" ? activeWorkers : statusValue === "completed" || statusValue === "done" ? maxWorkers : 0;
   return {
     id: String(raw.id ?? crypto.randomUUID()), title: String(raw.title ?? "未命名任务"), engine,
     progress: Math.round(Number(raw.progress ?? 0) * 100), status: statusValue === "completed" ? "done" : (["running", "queued", "failed", "cancelled", "done"].includes(statusValue) ? statusValue : "queued") as Job["status"],
     segments: Array.isArray(raw.segments) ? `${raw.segments.filter(segment => typeof segment === "object" && segment && (segment as { status?: string }).status === "completed").length} / ${raw.segments.length} 段` : String(raw.segment_progress ?? "等待中"), duration: raw.duration ? String(raw.duration) : undefined,
     outputPath: output.path ? String(output.path) : raw.outputPath ? String(raw.outputPath) : raw.output_path ? String(raw.output_path) : undefined,
+    acceleration: workers > 0 ? `GPU ×${workers}` : undefined,
   };
 }
 function statusValueLabel(status: Job["status"]) { return status === "running" ? "生成中" : status === "queued" ? "排队" : status === "done" ? "已完成" : status === "cancelled" ? "已取消" : "失败"; }
@@ -516,7 +521,7 @@ export function App() {
             params: withoutGptVoiceApiParameters(toApiParams("gpt_sovits", completeParameters)),
           }];
         }));
-        const response = await fetch(apiUrl("/api/jobs/multi-speaker"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: effectiveProjectName, script: text, assignments, lineIntervalMs: multiSpeakerInterval, qualityPreset: multiSpeakerQuality, longAudio }) });
+        const response = await fetch(apiUrl("/api/jobs/multi-speaker"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: effectiveProjectName, script: text, assignments, lineIntervalMs: multiSpeakerInterval, qualityPreset: multiSpeakerQuality, aggressiveConcurrency: true, longAudio }) });
         reachedBackend = true;
         if (!response.ok) {
           const details = await response.json().catch(() => null) as { detail?: string } | null;
@@ -706,7 +711,7 @@ export function App() {
         {queueOpen && <div className="job-list">{jobs.length === 0 ? <div className="empty-queue"><ListMusic size={24} /><div><strong>队列还是空的</strong><span>配置参数并生成后，真实任务会出现在这里。</span></div></div> : jobs.map(job => <div className="job-row" key={job.id}>
           <button className={`job-play ${job.status}`} onClick={() => job.status === "done" ? void playCompletedOutput(job) : ["failed", "cancelled"].includes(job.status) ? void retryJob(job.id) : ["running", "queued"].includes(job.status) ? setCancelTarget(job) : undefined} title={job.status === "done" ? "试听音频" : ["running", "queued"].includes(job.status) ? "取消任务" : ["failed", "cancelled"].includes(job.status) ? "重试任务" : statusValueLabel(job.status)}>{["running", "queued"].includes(job.status) ? <Square size={13} fill="currentColor" /> : job.status === "done" ? <Play size={15} fill="currentColor" /> : ["failed", "cancelled"].includes(job.status) ? <RefreshCw size={15} /> : <Clock3 size={15} />}</button>
           <div className="job-main"><div className="job-title"><strong>{job.title}</strong><span>{engines[job.engine].name}</span></div><div className="progress-line"><div className="progress-track"><i style={{ width: `${job.progress}%` }} /></div><span>{job.status === "done" ? job.duration : `${job.progress}%`}</span></div></div>
-          <div className="job-segments">{job.status === "running" && <Activity size={14} />}{job.segments}</div>
+          <div className="job-segments">{job.status === "running" && <Activity size={14} />}{job.segments}{job.acceleration && <b className="gpu-worker-badge">{job.acceleration}</b>}</div>
           {job.status === "done" ? <div className="job-result-actions"><button onClick={() => void playCompletedOutput(job)}><Play size={14} fill="currentColor" />试听</button><button onClick={() => void revealCompletedOutput(job.id, job.outputPath)}><FolderOpen size={14} />打开位置</button></div> : <div className={`job-status ${job.status}`}>{statusValueLabel(job.status)}</div>}
         </div>)}</div>}
       </section>
