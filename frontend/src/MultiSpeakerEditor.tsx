@@ -98,7 +98,7 @@ export function MultiSpeakerEditor({
       </article>
 
       <article className="multi-mapping-card">
-        <div className="multi-card-title"><span><UsersRound size={18} /></span><div><strong>角色声音映射</strong><small>质量策略统一稳定参数；角色预设负责其余参数</small></div></div>
+        <div className="multi-card-title"><span><UsersRound size={18} /></span><div><strong>角色声音映射</strong><small>默认激进双 Worker；显存不足时自动退回单 Worker续作</small></div></div>
         <div className="multi-global-settings">
           <label className="multi-quality-setting" htmlFor="multi-quality-preset"><span>质量策略</span><select id="multi-quality-preset" value={qualityPreset} onChange={event => onQualityPresetChange(event.target.value as MultiSpeakerQualityPreset)}>{MULTI_SPEAKER_QUALITY_PRESETS.map(option => <option key={option.id} value={option.id}>{option.name}</option>)}</select><small>{MULTI_SPEAKER_QUALITY_PRESETS.find(option => option.id === qualityPreset)?.description}</small></label>
           <label className="multi-interval-setting" htmlFor="multi-line-interval"><span>台词间隔</span><div><input id="multi-line-interval" type="number" min="0" max="10000" step="10" value={lineIntervalMs} onChange={event => onLineIntervalChange(Math.max(0, Math.min(10000, Number(event.target.value) || 0)))} /><b>ms</b></div></label>

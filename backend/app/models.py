@@ -79,6 +79,7 @@ class MultiSpeakerJobCreate(BaseModel):
     quality_preset: Literal["stable", "balanced", "expressive"] = Field(
         default="stable", alias="qualityPreset"
     )
+    aggressive_concurrency: bool = Field(default=True, alias="aggressiveConcurrency")
     long_audio: LongAudioOptions = Field(default_factory=LongAudioOptions, alias="longAudio")
     title: str | None = None
 
@@ -107,6 +108,14 @@ class MultiSpeakerManifest(BaseModel):
         default="stable", alias="qualityPreset"
     )
     assignments: dict[str, MultiSpeakerAssignmentManifest]
+    scheduling_mode: Literal["adaptive_gpu", "aggressive_gpu"] = Field(default="adaptive_gpu", alias="schedulingMode")
+    aggressive_concurrency: bool = Field(default=False, alias="aggressiveConcurrency")
+    planned_workers: int = Field(default=1, alias="plannedWorkers", ge=1, le=16)
+    active_workers: int = Field(default=0, alias="activeWorkers", ge=0, le=16)
+    max_workers_used: int = Field(default=1, alias="maxWorkersUsed", ge=1, le=16)
+    scheduler_detail: str = Field(default="等待 GPU 调度", alias="schedulerDetail")
+    gpu_name: str | None = Field(default=None, alias="gpuName")
+    gpu_memory_total_mb: int | None = Field(default=None, alias="gpuMemoryTotalMb")
 
 
 class SegmentManifest(BaseModel):

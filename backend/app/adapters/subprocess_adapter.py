@@ -137,6 +137,7 @@ class SubprocessAdapter(EngineAdapter):
         backend_root: str | Path | None = None,
         managed_model_path: str | Path | None = None,
         managed_tool_paths: list[str | Path] | None = None,
+        worker_label: str | None = None,
     ):
         self.engine_id = engine_id
         self.python_path = Path(python_path)
@@ -147,6 +148,7 @@ class SubprocessAdapter(EngineAdapter):
         self.managed = managed
         self.managed_model_path = Path(managed_model_path) if managed_model_path else None
         self.managed_tool_paths = [Path(path) for path in (managed_tool_paths or [])]
+        self.worker_label = worker_label
         self.backend_root = Path(backend_root or os.getenv("LANGBAI_BACKEND_ROOT") or MODULE_BACKEND_ROOT).resolve()
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -227,7 +229,7 @@ class SubprocessAdapter(EngineAdapter):
     def runtime_snapshot(self, lines: int = 160) -> dict[str, Any]:
         process = self._process
         running = process is not None and process.poll() is None
-        log_path = self.log_dir / f"{self.engine_id}.log"
+        log_path = self._log_path()
         log_lines: list[str] = []
         if log_path.is_file():
             try:
@@ -248,6 +250,10 @@ class SubprocessAdapter(EngineAdapter):
     def start(self) -> None:
         with self._lock:
             self._start()
+
+    def _log_path(self) -> Path:
+        suffix = f"-{self.worker_label}" if self.worker_label else ""
+        return self.log_dir / f"{self.engine_id}{suffix}.log"
 
     def _start(self) -> None:
         if self._process is not None and self._process.poll() is None:
@@ -271,7 +277,7 @@ class SubprocessAdapter(EngineAdapter):
         if self.engine_id == "voxcpm":
             env.setdefault("HF_HOME", str(self.project_path / "cache" / "huggingface"))
             env.setdefault("MODELSCOPE_CACHE", str(self.project_path / "cache" / "modelscope"))
-        self._log_handle = (self.log_dir / f"{self.engine_id}.log").open("a", encoding="utf-8")
+        self._log_handle = self._log_path().open("a", encoding="utf-8")
         self._process = subprocess.Popen(
             [str(self.python_path), "-u", str(self.backend_root / "engine_worker.py")],
             cwd=str(self.project_path), env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -356,6 +362,24 @@ class SubprocessAdapter(EngineAdapter):
         if self._log_handle is not None:
             self._log_handle.close()
             self._log_handle = None
+
+    def spawn_parallel_worker(self, worker_index: int) -> EngineAdapter | None:
+        if self.engine_id != "gpt_sovits":
+            return None
+        return SubprocessAdapter(
+            self.engine_id,
+            self.python_path,
+            self.project_path,
+            self.log_dir,
+            self.runtime_root,
+            parameter_defaults=self.parameter_defaults,
+            required_parameters=self.required_parameters,
+            managed=self.managed,
+            backend_root=self.backend_root,
+            managed_model_path=self.managed_model_path,
+            managed_tool_paths=self.managed_tool_paths,
+            worker_label=f"parallel-{worker_index}",
+        )
 
 
 def _build_resolved_adapter(engine_id: str, log_dir: Path, managed_root: Path, binding_store: EngineBindingStore | None = None) -> SubprocessAdapter:
@@ -468,6 +492,9 @@ class AutoDetectAdapter(EngineAdapter):
             delegate = self._delegate
         if delegate is not None:
             delegate.cancel_current()
+
+    def spawn_parallel_worker(self, worker_index: int) -> EngineAdapter | None:
+        return self._current().spawn_parallel_worker(worker_index)
 
 
 def build_default_adapters(log_dir: str | Path, install_root: str | Path | None = None, binding_store: EngineBindingStore | None = None) -> dict[str, EngineAdapter]:

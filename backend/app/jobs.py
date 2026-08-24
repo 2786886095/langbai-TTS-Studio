@@ -7,11 +7,15 @@ import re
 import shutil
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
 from .adapters import EngineAdapter
 from .audio import LongSilenceError, merge_wav_files, prepare_tts_segment, repair_tts_long_silence
+from .gpu_scheduler import (
+    GpuSnapshotProvider, is_cuda_oom, plan_gpt_sovits_workers, read_nvidia_gpu_snapshot,
+)
 from .models import (
     JobCreate, JobManifest, JobStatus, MultiSpeakerAssignmentManifest,
     MultiSpeakerJobCreate, MultiSpeakerManifest, SegmentManifest, SegmentStatus, now_iso,
@@ -88,17 +92,20 @@ class EventBroker:
 
 class JobManager:
     def __init__(self, store: JobStore, adapters: dict[str, EngineAdapter], *, mock_mode: bool = False,
-                 voice_store: VoiceProfileStore | None = None):
+                 voice_store: VoiceProfileStore | None = None,
+                 gpu_snapshot_provider: GpuSnapshotProvider = read_nvidia_gpu_snapshot):
         self.store = store
         self.adapters = adapters
         self.mock_mode = mock_mode
         self.events = EventBroker()
         self.voice_store = voice_store
+        self.gpu_snapshot_provider = gpu_snapshot_provider
         self.session_id = uuid.uuid4().hex
         self._queue: queue.Queue[str | None] = queue.Queue()
         self._cancelled: set[str] = set()
         self._thread: threading.Thread | None = None
         self._lock = threading.RLock()
+        self._active_job_adapters: dict[str, list[EngineAdapter]] = {}
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -119,6 +126,10 @@ class JobManager:
                 self.store.save(job)
 
     def close(self) -> None:
+        with self._lock:
+            active = [adapter for group in self._active_job_adapters.values() for adapter in group]
+        for adapter in dict.fromkeys(active):
+            adapter.cancel_current()
         self._queue.put(None)
         if self._thread:
             self._thread.join(timeout=5)
@@ -237,6 +248,8 @@ class JobManager:
             multi_speaker=MultiSpeakerManifest(
                 lineIntervalMs=request.line_interval_ms,
                 qualityPreset=request.quality_preset,
+                schedulingMode="aggressive_gpu" if request.aggressive_concurrency else "adaptive_gpu",
+                aggressiveConcurrency=request.aggressive_concurrency,
                 assignments=resolved_assignments,
             ),
             session_id=self.session_id,
@@ -264,7 +277,7 @@ class JobManager:
         return self.store.load(job_id)
 
     def cancel(self, job_id: str) -> JobManifest:
-        adapter_to_cancel: EngineAdapter | None = None
+        adapters_to_cancel: list[EngineAdapter] = []
         with self._lock:
             job = self._require(job_id)
             if job.status in (JobStatus.completed, JobStatus.cancelled):
@@ -277,9 +290,11 @@ class JobManager:
                 self.store.save(job)
                 self._emit(job, "job.cancelled")
             elif job.status == JobStatus.running:
-                adapter_to_cancel = self.adapters.get(job.engine)
-        if adapter_to_cancel is not None:
-            adapter_to_cancel.cancel_current()
+                adapters_to_cancel = list(
+                    self._active_job_adapters.get(job_id) or [self.adapters[job.engine]]
+                )
+        for adapter in adapters_to_cancel:
+            adapter.cancel_current()
         return self._require(job_id)
 
     def retry(self, job_id: str) -> JobManifest:
@@ -358,6 +373,10 @@ class JobManager:
             try:
                 self._run_job(job_id)
             except Exception as exc:
+                with self._lock:
+                    active = self._active_job_adapters.pop(job_id, [])
+                for extra_adapter in active[1:]:
+                    extra_adapter.close()
                 # Persist unexpected merge/storage errors instead of leaving a task stuck at running.
                 job = self.store.load(job_id)
                 if job is not None and job.status not in (JobStatus.completed, JobStatus.cancelled, JobStatus.failed):
@@ -379,88 +398,33 @@ class JobManager:
         job.updated_at = now_iso()
         self.store.save(job)
         self._emit(job, "job.started")
-        completed_count = sum(segment.status == SegmentStatus.completed for segment in job.segments)
-        total_segments = len(job.segments)
-        for segment in job.segments:
-            if segment.status == SegmentStatus.completed and segment.output_path and Path(segment.output_path).is_file():
-                continue
-            if job.id in self._cancelled:
-                return self._finish_cancelled(job)
-            output = segment_dir / f"{segment.index + 1:04d}.wav"
-            success = False
-            last_error = None
-            attempts_this_run = 0
-            while attempts_this_run <= job.long_audio.max_retries:
+        if job.mode == "multi_speaker":
+            success, failed_segment, last_error = self._run_multi_speaker_segments(
+                job, adapter, segment_dir
+            )
+            if not success:
                 if job.id in self._cancelled:
                     return self._finish_cancelled(job)
-                segment.status = SegmentStatus.running
-                segment.attempts += 1
-                attempts_this_run += 1
-                segment.error = None
-                job.updated_at = now_iso()
-                self.store.save(job)
-                self._emit(job, "segment.started")
-                try:
-                    call_parameters = job.parameters
-                    if job.mode == "multi_speaker":
-                        if job.multi_speaker is None or not segment.speaker:
-                            raise RuntimeError("多人任务缺少角色映射")
-                        call_parameters = job.multi_speaker.assignments[segment.speaker].parameters
-                    if self.mock_mode:
-                        call_parameters = {**call_parameters, "_segment_index": segment.index}
-                    attempt_parameters = dict(call_parameters)
-                    if job.mode == "multi_speaker" and job.multi_speaker is not None:
-                        base_seed = int(attempt_parameters.get("seed", -1))
-                        if base_seed >= 0 and attempts_this_run > 1:
-                            attempt_parameters["seed"] = max(
-                                1, (base_seed + (attempts_this_run - 1) * 104_729) % 2_147_483_647
-                            )
-                    adapter.synthesize(segment.text, output, attempt_parameters)
-                    if job.mode == "multi_speaker" and job.multi_speaker is not None:
-                        try:
-                            segment.quality = prepare_tts_segment(
-                                output, segment.text, quality_preset=job.multi_speaker.quality_preset
-                            )
-                        except LongSilenceError:
-                            if attempts_this_run <= job.long_audio.max_retries:
-                                raise
-                            repair = repair_tts_long_silence(
-                                output, quality_preset=job.multi_speaker.quality_preset
-                            )
-                            segment.quality = prepare_tts_segment(
-                                output, segment.text, quality_preset=job.multi_speaker.quality_preset
-                            )
-                            segment.quality.update(repair)
-                    segment.status = SegmentStatus.completed
-                    segment.output_path = str(output)
-                    segment.error = None
-                    success = True
-                    break
-                except Exception as exc:
+                if failed_segment is not None:
+                    return self._finish_failed_segment(job, failed_segment, last_error)
+                return
+        else:
+            with self._lock:
+                self._active_job_adapters[job.id] = [adapter]
+            try:
+                for segment in job.segments:
+                    if segment.status == SegmentStatus.completed and segment.output_path and Path(segment.output_path).is_file():
+                        continue
                     if job.id in self._cancelled:
                         return self._finish_cancelled(job)
-                    last_error = f"{type(exc).__name__}: {exc}"
-                    segment.status = SegmentStatus.failed
-                    segment.error = last_error
-                    job.updated_at = now_iso()
-                    self.store.save(job)
-                    self._emit(job, "segment.failed")
-            if not success:
-                job.status = JobStatus.failed
-                location = f"第 {segment.index + 1} 段"
-                if segment.speaker and segment.script_line_number:
-                    location = f"第 {segment.script_line_number} 行【{segment.speaker}】"
-                job.error = f"{location}失败：{last_error}"
-                job.progress = completed_count / total_segments
-                job.updated_at = now_iso()
-                self.store.save(job)
-                self._emit(job, "job.failed")
-                return
-            completed_count += 1
-            job.progress = completed_count / total_segments
-            job.updated_at = now_iso()
-            self.store.save(job)
-            self._emit(job, "segment.completed")
+                    success, last_error = self._process_segment(job, segment, adapter, segment_dir)
+                    if not success:
+                        if job.id in self._cancelled:
+                            return self._finish_cancelled(job)
+                        return self._finish_failed_segment(job, segment, last_error)
+            finally:
+                with self._lock:
+                    self._active_job_adapters.pop(job.id, None)
         if job.id in self._cancelled:
             return self._finish_cancelled(job)
         output_dir = self.store.output_dir()
@@ -497,6 +461,290 @@ class JobManager:
                 segment.output_path = None
         self.store.save(job)
         self._emit(job, "job.completed")
+
+    def _process_segment(
+        self,
+        job: JobManifest,
+        segment: SegmentManifest,
+        adapter: EngineAdapter,
+        segment_dir: Path,
+        *,
+        fail_fast_oom: bool = False,
+    ) -> tuple[bool, str | None]:
+        output = segment_dir / f"{segment.index + 1:04d}.wav"
+        attempts_this_run = 0
+        last_error: str | None = None
+        while attempts_this_run <= job.long_audio.max_retries:
+            if job.id in self._cancelled:
+                return False, "用户已取消"
+            with self._lock:
+                segment.status = SegmentStatus.running
+                segment.attempts += 1
+                attempts_this_run += 1
+                segment.error = None
+                job.updated_at = now_iso()
+                self.store.save(job)
+                self._emit(job, "segment.started")
+            try:
+                call_parameters = job.parameters
+                if job.mode == "multi_speaker":
+                    if job.multi_speaker is None or not segment.speaker:
+                        raise RuntimeError("多人任务缺少角色映射")
+                    call_parameters = job.multi_speaker.assignments[segment.speaker].parameters
+                if self.mock_mode:
+                    call_parameters = {**call_parameters, "_segment_index": segment.index}
+                attempt_parameters = dict(call_parameters)
+                if job.mode == "multi_speaker" and job.multi_speaker is not None:
+                    base_seed = int(attempt_parameters.get("seed", -1))
+                    if base_seed >= 0 and attempts_this_run > 1:
+                        attempt_parameters["seed"] = max(
+                            1, (base_seed + (attempts_this_run - 1) * 104_729) % 2_147_483_647
+                        )
+                adapter.synthesize(segment.text, output, attempt_parameters)
+                quality: dict[str, Any] | None = None
+                if job.mode == "multi_speaker" and job.multi_speaker is not None:
+                    try:
+                        quality = prepare_tts_segment(
+                            output, segment.text, quality_preset=job.multi_speaker.quality_preset
+                        )
+                    except LongSilenceError:
+                        if attempts_this_run <= job.long_audio.max_retries:
+                            raise
+                        repair = repair_tts_long_silence(
+                            output, quality_preset=job.multi_speaker.quality_preset
+                        )
+                        quality = prepare_tts_segment(
+                            output, segment.text, quality_preset=job.multi_speaker.quality_preset
+                        )
+                        quality.update(repair)
+                with self._lock:
+                    segment.quality = quality
+                    segment.status = SegmentStatus.completed
+                    segment.output_path = str(output)
+                    segment.error = None
+                    job.progress = sum(
+                        item.status == SegmentStatus.completed for item in job.segments
+                    ) / len(job.segments)
+                    job.updated_at = now_iso()
+                    self.store.save(job)
+                    self._emit(job, "segment.completed")
+                return True, None
+            except Exception as exc:
+                if job.id in self._cancelled:
+                    return False, "用户已取消"
+                last_error = f"{type(exc).__name__}: {exc}"
+                with self._lock:
+                    segment.status = SegmentStatus.failed
+                    segment.error = last_error
+                    job.updated_at = now_iso()
+                    self.store.save(job)
+                    self._emit(job, "segment.failed")
+                if fail_fast_oom and is_cuda_oom(last_error):
+                    break
+        return False, last_error
+
+    def _run_multi_speaker_segments(
+        self, job: JobManifest, primary: EngineAdapter, segment_dir: Path,
+    ) -> tuple[bool, SegmentManifest | None, str | None]:
+        if job.multi_speaker is None:
+            return False, None, "多人任务缺少角色映射"
+        pending = [
+            segment for segment in job.segments
+            if not (
+                segment.status == SegmentStatus.completed
+                and segment.output_path
+                and Path(segment.output_path).is_file()
+            )
+        ]
+        if not pending:
+            return True, None, None
+
+        before_warmup = self.gpu_snapshot_provider()
+        first = pending.pop(0)
+        with self._lock:
+            self._active_job_adapters[job.id] = [primary]
+        success, error = self._process_segment(job, first, primary, segment_dir)
+        if not success:
+            with self._lock:
+                self._active_job_adapters.pop(job.id, None)
+            return False, first, error
+        if not pending:
+            with self._lock:
+                self._active_job_adapters.pop(job.id, None)
+            return True, None, None
+
+        after_warmup = self.gpu_snapshot_provider()
+        remaining_roles = list(dict.fromkeys(segment.speaker or "" for segment in pending))
+        plan = plan_gpt_sovits_workers(
+            before_warmup,
+            after_warmup,
+            role_count=len(remaining_roles),
+            pending_segments=len(pending),
+            memory_fraction=0.98 if job.multi_speaker.aggressive_concurrency else 0.90,
+            aggressive=job.multi_speaker.aggressive_concurrency,
+        )
+        workers: list[EngineAdapter] = [primary]
+        for index in range(1, plan.workers):
+            try:
+                worker = primary.spawn_parallel_worker(index + 1)
+            except Exception:
+                worker = None
+            if worker is None:
+                break
+            workers.append(worker)
+
+        with self._lock:
+            job.multi_speaker.planned_workers = len(workers)
+            job.multi_speaker.active_workers = len(workers)
+            job.multi_speaker.max_workers_used = max(
+                job.multi_speaker.max_workers_used, len(workers)
+            )
+            job.multi_speaker.scheduler_detail = plan.detail if len(workers) == plan.workers else (
+                f"{plan.detail}；当前引擎仅成功创建 {len(workers)} 个 Worker"
+            )
+            if after_warmup is not None:
+                job.multi_speaker.gpu_name = after_warmup.name
+                job.multi_speaker.gpu_memory_total_mb = after_warmup.memory_total_mb
+            self._active_job_adapters[job.id] = workers
+            job.updated_at = now_iso()
+            self.store.save(job)
+            self._emit(job, "job.scheduler.updated")
+
+        groups: dict[str, list[SegmentManifest]] = {}
+        for segment in pending:
+            groups.setdefault(segment.speaker or "", []).append(segment)
+        ordered_groups = list(groups.values())
+        ordered_groups.sort(
+            key=lambda group: (group[0].speaker != first.speaker, -len(group))
+        )
+        buckets: list[list[SegmentManifest]] = [[] for _ in workers]
+        loads = [0 for _ in workers]
+        for group in ordered_groups:
+            target = min(range(len(workers)), key=lambda index: loads[index])
+            buckets[target].extend(group)
+            loads[target] += len(group)
+
+        fallback: dict[int, SegmentManifest] = {}
+        failures: list[tuple[SegmentManifest, str | None]] = []
+        result_lock = threading.Lock()
+        stop_event = threading.Event()
+        concurrency_collapse = threading.Event()
+
+        def queue_fallback(items: list[SegmentManifest]) -> None:
+            with result_lock:
+                for item in items:
+                    fallback[item.index] = item
+
+        def collapse_to_primary(items: list[SegmentManifest]) -> None:
+            queue_fallback(items)
+            concurrency_collapse.set()
+            stop_event.set()
+            for active_worker in workers:
+                active_worker.cancel_current()
+
+        def run_bucket(worker_index: int) -> None:
+            worker = workers[worker_index]
+            bucket = buckets[worker_index]
+            for offset, segment in enumerate(bucket):
+                if job.id in self._cancelled:
+                    return
+                if concurrency_collapse.is_set():
+                    queue_fallback(bucket[offset:])
+                    return
+                if stop_event.is_set():
+                    return
+                item_ok, item_error = self._process_segment(
+                    job, segment, worker, segment_dir, fail_fast_oom=len(workers) > 1
+                )
+                if not item_ok:
+                    if len(workers) > 1 and (
+                        is_cuda_oom(item_error) or concurrency_collapse.is_set()
+                    ):
+                        collapse_to_primary(bucket[offset:])
+                        return
+                    with result_lock:
+                        failures.append((segment, item_error))
+                    stop_event.set()
+                    return
+                if worker_index > 0 and plan.memory_limit_mb and (offset + 1) % 8 == 0:
+                    snapshot = self.gpu_snapshot_provider()
+                    if snapshot is not None and (
+                        snapshot.memory_used_mb > plan.memory_limit_mb
+                        or snapshot.temperature_c >= 87
+                    ):
+                        queue_fallback(bucket[offset + 1:])
+                        return
+
+        try:
+            with ThreadPoolExecutor(
+                max_workers=len(workers), thread_name_prefix="gpt-sovits-role"
+            ) as executor:
+                futures = [
+                    executor.submit(run_bucket, index)
+                    for index, bucket in enumerate(buckets)
+                    if bucket
+                ]
+                for future in futures:
+                    future.result()
+        finally:
+            for worker in workers[1:]:
+                worker.close()
+            with self._lock:
+                self._active_job_adapters[job.id] = [primary]
+                job.multi_speaker.active_workers = 1 if fallback else 0
+                if concurrency_collapse.is_set():
+                    job.multi_speaker.scheduler_detail = (
+                        f"{job.multi_speaker.scheduler_detail}；并发显存不足，已自动退回单 Worker续作"
+                    )
+                self.store.save(job)
+
+        if job.id in self._cancelled:
+            with self._lock:
+                self._active_job_adapters.pop(job.id, None)
+            return False, None, "用户已取消"
+        if failures:
+            with self._lock:
+                self._active_job_adapters.pop(job.id, None)
+            return False, failures[0][0], failures[0][1]
+
+        # CUDA OOM or a runtime memory/temperature spike retires excess workers.
+        # Their untouched segments continue on the primary worker instead of
+        # failing the full long-form job.
+        fallback_segments = sorted(
+            fallback.values(), key=lambda segment: (segment.speaker or "", segment.index)
+        )
+        for segment in fallback_segments:
+            if (
+                segment.status == SegmentStatus.completed
+                and segment.output_path
+                and Path(segment.output_path).is_file()
+            ):
+                continue
+            item_ok, item_error = self._process_segment(job, segment, primary, segment_dir)
+            if not item_ok:
+                with self._lock:
+                    self._active_job_adapters.pop(job.id, None)
+                return False, segment, item_error
+        with self._lock:
+            job.multi_speaker.active_workers = 0
+            self._active_job_adapters.pop(job.id, None)
+            self.store.save(job)
+        return True, None, None
+
+    def _finish_failed_segment(
+        self, job: JobManifest, segment: SegmentManifest, last_error: str | None,
+    ) -> None:
+        job.status = JobStatus.failed
+        location = f"第 {segment.index + 1} 段"
+        if segment.speaker and segment.script_line_number:
+            location = f"第 {segment.script_line_number} 行【{segment.speaker}】"
+        job.error = f"{location}失败：{last_error}"
+        job.progress = sum(
+            item.status == SegmentStatus.completed for item in job.segments
+        ) / len(job.segments)
+        job.updated_at = now_iso()
+        self.store.save(job)
+        self._emit(job, "job.failed")
 
     @staticmethod
     def _available_output_path(directory: Path, stem: str, suffix: str) -> Path:

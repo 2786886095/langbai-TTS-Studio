@@ -21,6 +21,24 @@ let desktopState = {};
 let desktopLogStream = null;
 const audioGrants = new Map();
 const AUDIO_EXTENSIONS = new Set(['.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aac']);
+const ownsSingleInstanceLock = app.requestSingleInstanceLock();
+
+if (!ownsSingleInstanceLock) app.quit();
+
+function focusPrimaryWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  if (!mainWindow.isVisible()) mainWindow.show();
+  mainWindow.focus();
+  mainWindow.moveTop();
+}
+
+if (ownsSingleInstanceLock) {
+  app.on('second-instance', () => {
+    if (app.isReady()) focusPrimaryWindow();
+    else app.whenReady().then(focusPrimaryWindow);
+  });
+}
 
 protocol.registerSchemesAsPrivileged([{
   scheme: 'langbai-audio',
@@ -525,6 +543,7 @@ ipcMain.handle('app:runtime-info', () => ({
 }));
 
 app.whenReady().then(async () => {
+  if (!ownsSingleInstanceLock) return;
   app.setAppUserModelId('studio.langbai.tts');
   openDesktopLog();
   process.on('uncaughtException', (error) => logDesktop('ERROR', `Uncaught exception: ${error.stack || error.message}`));
