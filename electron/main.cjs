@@ -19,6 +19,8 @@ let closeApproved = false;
 let closeCheckInProgress = false;
 let desktopState = {};
 let desktopLogStream = null;
+const DESKTOP_LOG_MAX_BYTES = 20 * 1024 * 1024;
+const DESKTOP_LOG_BACKUPS = 3;
 const audioGrants = new Map();
 const AUDIO_EXTENSIONS = new Set(['.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aac']);
 const ownsSingleInstanceLock = app.requestSingleInstanceLock();
@@ -56,6 +58,25 @@ function desktopLogPath() {
 function openDesktopLog() {
   const target = desktopLogPath();
   fs.mkdirSync(path.dirname(target), { recursive: true });
+  try {
+    if (fs.existsSync(target) && fs.statSync(target).size >= DESKTOP_LOG_MAX_BYTES) {
+      if (fs.statSync(target).size > DESKTOP_LOG_MAX_BYTES * 4) {
+        // A log from an affected older release can be several gigabytes; do
+        // not preserve that pathological file as a backup.
+        fs.rmSync(target, { force: true });
+      } else {
+        for (let index = DESKTOP_LOG_BACKUPS; index >= 1; index -= 1) {
+          const source = index === 1 ? target : `${target}.${index - 1}`;
+          const destination = `${target}.${index}`;
+          if (!fs.existsSync(source)) continue;
+          if (fs.existsSync(destination)) fs.rmSync(destination, { force: true });
+          fs.renameSync(source, destination);
+        }
+      }
+    }
+  } catch (error) {
+    console.error(`Unable to rotate desktop log: ${error.message}`);
+  }
   desktopLogStream = fs.createWriteStream(target, { flags: 'a', encoding: 'utf8' });
 }
 
@@ -271,7 +292,11 @@ async function startBackend() {
     },
   );
 
-  backendProcess.stdout?.on('data', (chunk) => logDesktop('INFO', `[backend] ${String(chunk).trimEnd()}`));
+  backendProcess.stdout?.on('data', (chunk) => {
+    const message = String(chunk).trimEnd();
+    const isRoutinePoll = /"GET \/api\/(?:engines\/status|jobs) HTTP\/1\.1" 200 OK/.test(message);
+    if (message && !isRoutinePoll) logDesktop('INFO', `[backend] ${message}`);
+  });
   backendProcess.stderr?.on('data', (chunk) => logDesktop('ERROR', `[backend] ${String(chunk).trimEnd()}`));
   backendProcess.once('exit', (code, signal) => {
     backendProcess = null;

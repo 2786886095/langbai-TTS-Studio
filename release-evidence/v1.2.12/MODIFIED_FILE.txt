@@ -1,0 +1,8 @@
+artifact_role=MODIFIED_FILE
+branch=codex/v1.2.12-gpt-worker-protocol
+target=F:/AI/peyin/langbai-TTS-Studio-src/backend/engine_worker.py
+changed_field=GPT-SoVITS worker stdout/RPC channel isolation
+base_commit=e6b3b1f201e5fb6d7b238cafeea931df45c8eb6a
+original_sha256=9CAE7A33FD1844BD8B41A02D42FA53E4F290EB0C56989315D0483A4F5DD02E63
+modified_sha256=AD29307C10C634B27BF8779C7E48E71B3FB4BFF23CCF5817F751D1E3DF9FCD3F
+state=modified; protocol frames use @@LANGBAI_RPC@@ and native stdout is redirected away from RPC

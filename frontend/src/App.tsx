@@ -242,6 +242,7 @@ export function App() {
   const previousJobStatusRef = useRef(new Map<string, string>());
   const revealedJobIdsRef = useRef(new Set<string>());
   const refreshInFlightRef = useRef(false);
+  const submitInFlightRef = useRef(false);
   const modeDraftsRef = useRef<Record<CreationMode, string>>({ single: initialText, multi_speaker: initialMultiSpeakerText });
   const currentParams = params[engine];
   const activeGeneration = useMemo(() => jobs.find(job => job.status === "running") ?? jobs.find(job => job.status === "queued") ?? null, [jobs]);
@@ -497,6 +498,9 @@ export function App() {
   const installAvailableUpdate = () => { void window.langbaiDesktop?.installUpdate?.(); };
 
   const submit = async () => {
+    if (submitInFlightRef.current) return;
+    submitInFlightRef.current = true;
+    try {
     if (!text.trim()) { setNotice("请先输入需要生成的文本。"); return; }
     if (engineStatus[engine] !== true) { setNotice(`${engines[engine].name} 尚未就绪。请先在“设置与路径”中检查或绑定本地引擎。`); return; }
     if (creationMode === "multi_speaker") {
@@ -595,6 +599,9 @@ export function App() {
       }
     }
     finally { setGenerating(false); }
+    } finally {
+      submitInFlightRef.current = false;
+    }
   };
   const retryJob = async (id: string) => { try { await fetch(apiUrl(`/api/jobs/${id}/retry`), { method: "POST" }); await refreshApi(); } catch { setNotice("重试失败：后端服务未连接。"); } };
   const cancelJob = async (id: string) => {
