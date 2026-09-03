@@ -1,7 +1,8 @@
+import io
 from pathlib import Path
 from types import SimpleNamespace
 
-from app.adapters.subprocess_adapter import SubprocessAdapter
+from app.adapters.subprocess_adapter import ENGINE_LOG_MAX_BYTES, SubprocessAdapter, _rotate_log, _tail_text_lines
 from engine_runtime import detect_gpt_sovits_version, has_override, recommended_gpt_sovits_sample_steps, resolve_torch_device
 
 
@@ -24,6 +25,57 @@ def test_gpt_sovits_defaults_follow_loaded_or_weight_version():
     assert detect_gpt_sovits_version({"version": "auto", "vits_weights_path": r"D:\models\v1\legacy.pth"}) == "v1"
     assert recommended_gpt_sovits_sample_steps("v3") == 32
     assert recommended_gpt_sovits_sample_steps("v4") == 8
+
+
+def test_worker_protocol_accepts_framed_and_legacy_json_but_rejects_progress_noise():
+    assert SubprocessAdapter._protocol_payload('@@LANGBAI_RPC@@{"ready":true}\n') == {"ready": True}
+    assert SubprocessAdapter._protocol_payload('{"ready":true}\n') == {"ready": True}
+    assert SubprocessAdapter._protocol_payload('emitting double-array: 2% |██|\r') is None
+
+
+def test_worker_protocol_drains_legacy_stdout_noise(tmp_path: Path):
+    class FakeStdout:
+        def __init__(self):
+            self.lines = iter([
+                "emitting double-array: 2% |██|\n",
+                '@@LANGBAI_RPC@@{"id":"request-1","ok":true}\n',
+            ])
+
+        def readline(self):
+            return next(self.lines, "")
+
+    class FakeProcess:
+        stdout = FakeStdout()
+
+        @staticmethod
+        def poll():
+            return None
+
+    adapter = SubprocessAdapter("gpt_sovits", tmp_path / "python.exe", tmp_path / "engine", tmp_path / "logs")
+    adapter._log_handle = io.StringIO()
+
+    response = adapter._read_protocol_message(FakeProcess())
+
+    assert response == {"id": "request-1", "ok": True}
+    assert "emitting double-array" in adapter._log_handle.getvalue()
+
+
+def test_engine_worker_reserves_private_rpc_pipe_and_redirects_native_stdout():
+    source = (Path(__file__).resolve().parents[1] / "engine_worker.py").read_text(encoding="utf-8")
+    assert 'PROTOCOL_PREFIX = "@@LANGBAI_RPC@@"' in source
+    assert "os.dup(sys.stdout.fileno())" in source
+    assert "os.dup2(sys.stderr.fileno(), sys.stdout.fileno())" in source
+
+
+def test_large_runtime_log_tail_is_bounded_and_rotated(tmp_path: Path):
+    log = tmp_path / "gpt_sovits.log"
+    log.write_bytes(b"old\n" * (ENGINE_LOG_MAX_BYTES // 4 + 1))
+
+    assert _tail_text_lines(log, 3) == ["old", "old", "old"]
+    _rotate_log(log)
+
+    assert not log.exists()
+    assert log.with_suffix(".log.1").is_file()
 
 
 def test_cancel_current_terminates_worker_without_waiting_for_adapter_lock(tmp_path: Path):

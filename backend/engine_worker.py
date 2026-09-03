@@ -12,8 +12,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from engine_runtime import detect_gpt_sovits_version, has_override, recommended_gpt_sovits_sample_steps, resolve_torch_device
 
 
-PROTOCOL_OUT = sys.stdout
-sys.stdout = sys.stderr  # third-party model logging must not corrupt JSON-RPC stdout
+PROTOCOL_PREFIX = "@@LANGBAI_RPC@@"
+
+# Keep the protocol on a duplicate of the original stdout pipe, then redirect the
+# process-level stdout descriptor to stderr before importing any engine modules.
+# GPT-SoVITS contains progress reporters that bypass ``sys.stdout`` and write to
+# fd 1 / the Windows standard-output handle directly; a Python-only assignment
+# left those reporters inside the JSON pipe and could deadlock once the pipe was
+# full.  The duplicate remains a private, protocol-only channel.
+_protocol_fd = os.dup(sys.stdout.fileno())
+PROTOCOL_OUT = os.fdopen(_protocol_fd, "w", encoding="utf-8", errors="replace", buffering=1)
+os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
+if os.name == "nt":
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        kernel32.SetStdHandle(-11, kernel32.GetStdHandle(-12))  # STDOUT -> STDERR
+    except Exception:
+        pass
+sys.stdout = sys.stderr
 ENGINE = os.environ["LANGBAI_ENGINE"]
 PROJECT = Path(os.environ["LANGBAI_PROJECT_PATH"]).resolve()
 RUNTIME_ROOT = Path(os.environ.get("LANGBAI_RUNTIME_ROOT", str(PROJECT))).resolve()
@@ -26,7 +44,7 @@ _model_key = None
 
 
 def emit(payload: dict) -> None:
-    PROTOCOL_OUT.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    PROTOCOL_OUT.write(PROTOCOL_PREFIX + json.dumps(payload, ensure_ascii=False) + "\n")
     PROTOCOL_OUT.flush()
 
 

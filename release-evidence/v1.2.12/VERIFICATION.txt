@@ -1,0 +1,56 @@
+branch=codex/v1.2.12-gpt-worker-protocol
+changed_field=GPT-SoVITS worker stdout/RPC channel isolation
+status=PASSED
+
+BASELINE
+command=backend/.venv/Scripts/python.exe -m pytest tests/test_subprocess_environment.py tests/test_multi_speaker.py -q -p no:cacheprovider
+working_directory=F:/AI/peyin/langbai-TTS-Studio-src/backend
+input=unmodified e6b3b1f source
+literal_result=16 passed; BASELINE_EXIT=0
+exit_status=0
+
+MODIFIED
+command=backend/.venv/Scripts/python.exe controller invoking actual GPT-SoVITS runtime with text "这是修复后的通信测试。"
+working_directory=F:/AI/peyin/langbai-TTS-Studio-src
+input=real local GPT-SoVITS v2Pro runtime and saved 高松灯 voice parameters
+literal_result=RESULT=completed SIZE=172844 PATH=F:/AI/peyin/langbai-TTS-Studio-src/runtime-smoke/v1.2.12-protocol.wav
+exit_status=0
+
+ROLLBACK
+command=bash release-evidence/v1.2.12/ROLLBACK.sh
+working_directory=F:/AI/peyin/langbai-TTS-Studio-v1.2.12-rollback-test
+input=modified v1.2.12 source copy
+literal_result=ROLLBACK_RESULT=restored BASE_COMMIT=e6b3b1f201e5fb6d7b238cafeea931df45c8eb6a; ROLLBACK_HASH_MATCH=True; 16 passed
+exit_status=0
+restored_behavior_status=backend/engine_worker.py hash matches v1.2.11 base and baseline suite passes
+
+REGRESSION
+command=backend/.venv/Scripts/python.exe -m pytest tests -q -p no:cacheprovider
+working_directory=F:/AI/peyin/langbai-TTS-Studio-src/backend
+input=modified v1.2.12 source
+literal_result=87 passed; BACKEND_EXIT=0
+exit_status=0
+
+PREPACKAGE
+command=backend/.venv/Scripts/python.exe -m pytest tests/acceptance -q -p no:cacheprovider --require-implementation --prepackage
+working_directory=F:/AI/peyin/langbai-TTS-Studio-src
+input=modified v1.2.12 source
+literal_result=67 passed, 4 skipped, 1 warning in 33.29s; PREPACKAGE_EXIT=0
+exit_status=0
+
+PACKAGED
+command=backend/.venv/Scripts/python.exe -m pytest tests/acceptance/test_packaged_cleanup.py -q -p no:cacheprovider --packaged-evidence --packaged-exe=dist/win-unpacked/langbai-TTS-Studio.exe
+working_directory=F:/AI/peyin/langbai-TTS-Studio-release-v1.2.12
+input=clean detached worktree build 4f20f6e
+literal_result=1 passed in 9.87s; PACKAGED_CLEANUP_EXIT=0
+exit_status=0
+setup_path=F:/AI/peyin/langbai-TTS-Studio-release-v1.2.12/dist/langbai-TTS-Studio-Setup-1.2.12-x64.exe
+setup_size=122191703
+setup_sha256=525D26EB9A6E501280BA767FA6456C5DE9F42723EC62BD0A5A32EDAA0B5F5E13
+packaged_worker_hash_match=True
+
+ARTIFACTS
+modified_file=F:/AI/peyin/langbai-TTS-Studio-src/release-evidence/v1.2.12/MODIFIED_FILE.txt
+diff_file=F:/AI/peyin/langbai-TTS-Studio-src/release-evidence/v1.2.12/DIFF_FILE.patch
+verification=F:/AI/peyin/langbai-TTS-Studio-src/release-evidence/v1.2.12/VERIFICATION.txt
+rollback=F:/AI/peyin/langbai-TTS-Studio-src/release-evidence/v1.2.12/ROLLBACK.sh

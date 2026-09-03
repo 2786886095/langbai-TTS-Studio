@@ -17,6 +17,40 @@ from .base import EngineAdapter, EngineError
 
 MODULE_BACKEND_ROOT = Path(__file__).resolve().parents[2]
 MANAGED_SUPPLY_VERIFIER = ManagedSupply()
+PROTOCOL_PREFIX = "@@LANGBAI_RPC@@"
+ENGINE_LOG_MAX_BYTES = 32 * 1024 * 1024
+
+
+def _tail_text_lines(path: Path, count: int) -> list[str]:
+    """Read a bounded tail without loading multi-gigabyte runtime logs."""
+    wanted = max(1, count)
+    block_size = 64 * 1024
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        position = handle.tell()
+        chunks: list[bytes] = []
+        line_breaks = 0
+        while position > 0 and line_breaks <= wanted:
+            size = min(block_size, position)
+            position -= size
+            handle.seek(position)
+            chunk = handle.read(size)
+            chunks.append(chunk)
+            line_breaks += chunk.count(b"\n")
+    text = b"".join(reversed(chunks)).decode("utf-8", errors="replace")
+    return text.splitlines()[-wanted:]
+
+
+def _rotate_log(path: Path) -> None:
+    try:
+        if not path.is_file() or path.stat().st_size < ENGINE_LOG_MAX_BYTES:
+            return
+        backup = path.with_suffix(path.suffix + ".1")
+        backup.unlink(missing_ok=True)
+        path.replace(backup)
+    except OSError:
+        # Logging must never stop the engine from starting.
+        pass
 
 EXTERNAL_ROOT = Path(os.getenv("LANGBAI_EXTERNAL_ROOT") or (Path.home() / "Documents" / "langbai-TTS-Studio" / "external-engines"))
 
@@ -233,8 +267,7 @@ class SubprocessAdapter(EngineAdapter):
         log_lines: list[str] = []
         if log_path.is_file():
             try:
-                with log_path.open("r", encoding="utf-8", errors="replace") as handle:
-                    log_lines = handle.readlines()[-max(20, min(lines, 500)):]
+                log_lines = _tail_text_lines(log_path, max(20, min(lines, 500)))
             except OSError:
                 log_lines = []
         return {
@@ -254,6 +287,38 @@ class SubprocessAdapter(EngineAdapter):
     def _log_path(self) -> Path:
         suffix = f"-{self.worker_label}" if self.worker_label else ""
         return self.log_dir / f"{self.engine_id}{suffix}.log"
+
+    @staticmethod
+    def _protocol_payload(line: str) -> dict[str, Any] | None:
+        candidate = line.strip()
+        if candidate.startswith(PROTOCOL_PREFIX):
+            candidate = candidate[len(PROTOCOL_PREFIX):]
+        try:
+            message = json.loads(candidate)
+        except json.JSONDecodeError:
+            return None
+        return message if isinstance(message, dict) else None
+
+    def _read_protocol_message(self, process: subprocess.Popen) -> dict[str, Any]:
+        """Read the next RPC frame while tolerating legacy engine stdout noise."""
+        assert process.stdout is not None
+        while True:
+            line = process.stdout.readline()
+            if not line:
+                code = process.poll()
+                self.close()
+                raise EngineError(f"{self.engine_id} 工作进程无响应（退出码 {code}），详见日志")
+            message = self._protocol_payload(line)
+            if message is not None:
+                return message
+            # v1.2.11 and older workers could leak native progress output into
+            # stdout. Drain it instead of treating it as an RPC response.
+            if self._log_handle is not None:
+                try:
+                    self._log_handle.write(f"[stdout-noise] {line}")
+                    self._log_handle.flush()
+                except OSError:
+                    pass
 
     def _start(self) -> None:
         if self._process is not None and self._process.poll() is None:
@@ -277,18 +342,19 @@ class SubprocessAdapter(EngineAdapter):
         if self.engine_id == "voxcpm":
             env.setdefault("HF_HOME", str(self.project_path / "cache" / "huggingface"))
             env.setdefault("MODELSCOPE_CACHE", str(self.project_path / "cache" / "modelscope"))
-        self._log_handle = self._log_path().open("a", encoding="utf-8")
+        log_path = self._log_path()
+        _rotate_log(log_path)
+        self._log_handle = log_path.open("a", encoding="utf-8")
         self._process = subprocess.Popen(
             [str(self.python_path), "-u", str(self.backend_root / "engine_worker.py")],
             cwd=str(self.project_path), env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=self._log_handle, text=True, encoding="utf-8", errors="replace", bufsize=1,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
-        ready = self._process.stdout.readline() if self._process.stdout else ""
         try:
-            message = json.loads(ready)
-        except json.JSONDecodeError as exc:
-            raise EngineError(f"{self.engine_id} 工作进程启动失败，详见日志 {self.log_dir}: {ready!r}") from exc
+            message = self._read_protocol_message(self._process)
+        except EngineError as exc:
+            raise EngineError(f"{self.engine_id} 工作进程启动失败，详见日志 {self.log_dir}: {exc}") from exc
         if not message.get("ready"):
             raise EngineError(message.get("error") or f"{self.engine_id} 工作进程未就绪")
 
@@ -311,20 +377,14 @@ class SubprocessAdapter(EngineAdapter):
             try:
                 process.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
                 process.stdin.flush()
-                line = process.stdout.readline()
+                response = self._read_protocol_message(process)
             except (BrokenPipeError, OSError) as exc:
                 self.close()
                 raise EngineError(f"{self.engine_id} 工作进程意外退出") from exc
-            if not line:
-                code = process.poll()
-                self.close()
-                raise EngineError(f"{self.engine_id} 工作进程无响应（退出码 {code}），详见日志")
-            try:
-                response = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise EngineError(f"{self.engine_id} 返回了无效响应: {line[:300]}") from exc
-            if response.get("id") != request_id:
-                raise EngineError(f"{self.engine_id} 响应序号不匹配")
+            while response.get("id") != request_id:
+                # Drain a stale response from a legacy worker, but never let it
+                # satisfy a newer request. The current worker serializes calls.
+                response = self._read_protocol_message(process)
             if not response.get("ok"):
                 raise EngineError(response.get("error") or f"{self.engine_id} 生成失败")
             if not output_path.is_file() or output_path.stat().st_size == 0:

@@ -1,0 +1,38 @@
+branch: codex/v1.2.12-gpt-worker-protocol
+changed-field: GPT-SoVITS worker stdout/RPC channel isolation
+
+--- backend/engine_worker.py@e6b3b1f
++++ backend/engine_worker.py
+@@
+-PROTOCOL_OUT = sys.stdout
+-sys.stdout = sys.stderr
++PROTOCOL_PREFIX = "@@LANGBAI_RPC@@"
++_protocol_fd = os.dup(sys.stdout.fileno())
++PROTOCOL_OUT = os.fdopen(_protocol_fd, "w", encoding="utf-8", errors="replace", buffering=1)
++os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
++sys.stdout = sys.stderr
+@@
+-PROTOCOL_OUT.write(json.dumps(payload, ensure_ascii=False) + "\n")
++PROTOCOL_OUT.write(PROTOCOL_PREFIX + json.dumps(payload, ensure_ascii=False) + "\n")
+
+--- backend/app/adapters/subprocess_adapter.py@e6b3b1f
++++ backend/app/adapters/subprocess_adapter.py
+@@
++def _read_protocol_message(...):
++    # Drain legacy stdout noise until a framed/legacy JSON object is received.
++    ...
++def _tail_text_lines(...):
++    # Seek from the end instead of loading an entire runtime log.
++    ...
+
+--- frontend/src/App.tsx@e6b3b1f
++++ frontend/src/App.tsx
+@@
++const submitInFlightRef = useRef(false);
++if (submitInFlightRef.current) return;
+
+--- electron/main.cjs@e6b3b1f
++++ electron/main.cjs
+@@
++const DESKTOP_LOG_MAX_BYTES = 20 * 1024 * 1024;
++// Rotate bounded logs, discard pathological legacy logs, suppress routine polls.
