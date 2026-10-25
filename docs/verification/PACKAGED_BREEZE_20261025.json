@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "passed": true,
+  "sourceVerification": "runtime-smoke/packaged-breeze-final/verification.json",
+  "sourceVerificationSha256": "7cd1f2234d52e476f8e3be473c8273133ce9949987b27d79744f4b02e129d235",
+  "backendKind": "Final Electron bundle starting a packaged PyInstaller backend",
+  "output": {
+    "durationSeconds": 7.84,
+    "sampleRate": 24000,
+    "channels": 1,
+    "sampleWidthBytes": 2,
+    "frames": 188160,
+    "sha256": "e022cfeebf1d83bc43d012f75504d724f4b931ae01a54c5b21826843de6839d7",
+    "exactSpokenTranscriptVerified": false
+  },
+  "counts": {
+    "modelCalls": 1,
+    "modelRetries": 0,
+    "ioRecoveries": 0
+  },
+  "coldStartTimingSeconds": {
+    "totalWall": 106.886633,
+    "preparing": 37.781,
+    "loading": 52,
+    "warming": 11.609,
+    "generation": 5.36
+  },
+  "storage": {
+    "sqliteVersion": "3.50.4",
+    "journalMode": "DELETE"
+  },
+  "modelVerification": {
+    "performance_mode": "accelerated",
+    "cfg_scale": 1,
+    "possibly_truncated": false,
+    "weights_verified": true,
+    "fast_flags": {
+      "text_encoder": false,
+      "backbone_prefill": false,
+      "backbone_decode": true,
+      "depth_decoder": true,
+      "codec": false
+    },
+    "source_commit": "6eba901d1845353802652c708a4740fdfc5baa75",
+    "model_revision": "3e28c5151381a722f1d8661b4118c298caa77aa4",
+    "patch_sha256": "9b27b1fefc3d867abf9ac477f03e3a5ecc2c030a06fe4f18a4e56a3c1abe3ac6"
+  },
+  "installer": {
+    "name": "langbai-TTS-Studio-Setup-1.3.0-x64.exe",
+    "bytes": 123844219,
+    "sha256": "c75a377c32171f9d9a39f024ff11d80132932a5f5c60d00ad617b2e9456c1e51",
+    "authenticodeStatus": "NotSigned",
+    "kind": "Verified build used for v1.3.0 release",
+    "publishedToGitHubAtVerification": false,
+    "releaseTag": "v1.3.0"
+  },
+  "limitations": [
+    "This is a real short-clip smoke test of the final package, not another full 10000-Han generation run.",
+    "The final package also read the previous completed 92-segment longform task without changing its output hash; this readback was checked by the primary task.",
+    "This public summary includes neither reference recordings nor generated audio."
+  ]
+}

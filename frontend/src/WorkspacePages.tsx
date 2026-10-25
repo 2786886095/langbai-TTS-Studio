@@ -2,15 +2,18 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle, CheckCircle2, Clock3, Copy, Download, FileAudio, FolderOpen,
   History, ListMusic, LoaderCircle, Pause, Play, RefreshCw, RotateCcw,
-  Search, Square, Trash2, X,
+  Search, Square, Trash2, X, ChevronRight,
 } from "lucide-react";
-import { engines, type EngineId } from "./parameterSchemas";
+import { longformEngines as engines, longformStatusLabel, type LongformEngineId as EngineId, type LongformJob } from "./LongformWorkspace";
+import { serviceRequest, serviceUrl } from "./serviceClient";
+import { subscribeLongformEvents } from "./longformEvents";
+import { controlLongformJob } from "./longformControls";
 
 type PageKind = "queue" | "library" | "history";
-type Job = { id: string; title: string; engine: EngineId; status: string; progress: number; outputPath?: string; error?: string; createdAt?: string; updatedAt?: string; segmentsDone: number; segmentsTotal: number; acceleration?: string };
+type Job = { id: string; title: string; engine: EngineId; status: string; progress: number; outputPath?: string; error?: string; createdAt?: string; updatedAt?: string; segmentsDone: number; segmentsTotal: number; acceleration?: string; source: "legacy" | "longform"; version?: number; phase?: string };
 const apiBase = new URLSearchParams(window.location.search).get("backendUrl") ?? "";
 const apiUrl = (path: string) => `${apiBase}${path}`;
-const validEngines: EngineId[] = ["indextts2", "voxcpm", "gpt_sovits"];
+const validEngines: EngineId[] = ["indextts2", "voxcpm", "gpt_sovits", "breeze"];
 
 function friendlyError(reason: unknown, fallback: string) {
   const message = reason instanceof Error ? reason.message : "";
@@ -31,25 +34,29 @@ function normalize(raw: unknown): Job {
   const status = String(item.status ?? "queued");
   const workers = status === "running" ? activeWorkers : status === "completed" ? maxWorkers : 0;
   return {
+    source: item.source === "longform" ? "longform" : "legacy", version: Number(item.version ?? 0), phase: String(item.phase ?? item.status ?? "queued"),
     id: String(item.id ?? crypto.randomUUID()), title: String(item.title ?? "未命名语音任务"), engine,
     status, progress: Math.round(Math.min(1, Number(item.progress ?? 0)) * 100),
     outputPath: output.path ? String(output.path) : item.outputPath ? String(item.outputPath) : item.output_path ? String(item.output_path) : undefined,
     error: item.error ? String(item.error) : undefined, createdAt: item.createdAt ? String(item.createdAt) : item.created_at ? String(item.created_at) : undefined,
     updatedAt: item.updatedAt ? String(item.updatedAt) : item.updated_at ? String(item.updated_at) : undefined,
-    segmentsDone: rawSegments.filter(segment => segment && typeof segment === "object" && (segment as { status?: string }).status === "completed").length,
-    segmentsTotal: rawSegments.length,
+    segmentsDone: item.acceptedSegments !== undefined ? Number(item.acceptedSegments) : rawSegments.filter(segment => segment && typeof segment === "object" && (segment as { status?: string }).status === "completed").length,
+    segmentsTotal: Number(item.totalSegments ?? rawSegments.length),
     acceleration: workers > 0 ? `GPU ×${workers}` : undefined,
   };
 }
 
 function formatDate(value?: string) { if (!value) return "—"; const date = new Date(value); return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }); }
-function statusLabel(status: string) { return ({ queued: "排队中", running: "生成中", completed: "已完成", failed: "失败", cancelled: "已取消" } as Record<string, string>)[status] ?? status; }
+function statusLabel(status: string) { return longformStatusLabel(status); }
+const runningStates = ["preparing", "queued", "running", "acquiring_gpu", "loading", "warming", "generating", "pausing", "merging", "exporting", "verifying"];
 
-export function WorkspacePage({ kind, onCreate }: { kind: PageKind; onCreate: () => void }) {
+export function WorkspacePage({ kind, onCreate, onOpenLongform }: { kind: PageKind; onCreate: () => void; onOpenLongform?: (id: string) => void }) {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
+  useEffect(() => setStatusFilter("all"), [kind]);
   const [audioUrl, setAudioUrl] = useState("");
   const [audioTitle, setAudioTitle] = useState("");
   const [audioJobId, setAudioJobId] = useState("");
@@ -58,22 +65,29 @@ export function WorkspacePage({ kind, onCreate }: { kind: PageKind; onCreate: ()
   const [feedback, setFeedback] = useState<{ tone: "success" | "error"; text: string } | null>(null);
   const [deleting, setDeleting] = useState(false);
   const refreshInFlight = useRef(false);
-  const config = kind === "queue" ? { eyebrow: "实时任务", title: "任务队列", description: "查看长音频分段进度，取消或重试生成任务。", icon: ListMusic } : kind === "library" ? { eyebrow: "生成成果", title: "音频库", description: "集中管理已完成音频，并打开本地输出位置。", icon: FileAudio } : { eyebrow: "全部记录", title: "历史记录", description: "回看全部引擎任务、失败原因和完成时间。", icon: History };
+  const config = kind === "queue" ? { eyebrow: "实时任务", title: "任务", description: "队列与历史集中查看；长文任务支持暂停、恢复和分段检查。", icon: ListMusic } : kind === "library" ? { eyebrow: "生成成果", title: "成品", description: "集中试听和下载已经完成的音频，追溯来源任务。", icon: FileAudio } : { eyebrow: "全部记录", title: "历史记录", description: "回看全部引擎任务、失败原因和完成时间。", icon: History };
 
   const refresh = async () => {
     if (refreshInFlight.current) return false;
     refreshInFlight.current = true;
     try {
-      const endpoint = kind === "queue" ? "/api/jobs" : kind === "library" ? "/api/library/audio?limit=100" : "/api/history?limit=100";
-      const response = await fetch(apiUrl(endpoint));
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const raw = await response.json();
-      const rows = Array.isArray(raw) ? raw : Array.isArray(raw.jobs) ? raw.jobs : Array.isArray(raw.items) ? raw.items : [];
-      const normalizedAll: Job[] = rows.map((row: unknown) => normalize(row));
-      const normalized = kind === "queue" ? normalizedAll.filter(job => ["queued", "running"].includes(job.status)) : normalizedAll;
+      const results = await Promise.allSettled([
+        serviceRequest<unknown>(kind === "library" ? "/api/library/audio?limit=100" : "/api/history?limit=100"),
+        serviceRequest<{ items: unknown[] }>("/api/jobs/v2"),
+      ]);
+      if (results.every(result => result.status === "rejected")) throw new Error("无法读取任务服务");
+      const legacyRaw = results[0].status === "fulfilled" ? results[0].value : [];
+      const legacy = legacyRaw && typeof legacyRaw === "object" ? legacyRaw as Record<string, unknown> : {};
+      const legacyRows: unknown[] = Array.isArray(legacyRaw) ? legacyRaw : Array.isArray(legacy.jobs) ? legacy.jobs : Array.isArray(legacy.items) ? legacy.items : [];
+      const modernRows = results[1].status === "fulfilled" ? results[1].value.items : [];
+      const normalized = Array.from(new Map([
+        ...legacyRows.map(row => normalize({ ...(row as object), source: "legacy" })),
+        ...modernRows.map(row => normalize({ ...(row as object), source: "longform" })),
+      ].map(job => [job.id, job])).values()).sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
+
       setJobs(current => JSON.stringify(current) === JSON.stringify(normalized) ? current : normalized);
       setError(current => current ? "" : current);
-      return normalized.some(job => ["queued", "running"].includes(job.status));
+      return normalized.some(job => job.source === "legacy" && runningStates.includes(job.status));
     }
     catch (reason) {
       const nextError = friendlyError(reason, "无法读取任务");
@@ -88,7 +102,7 @@ export function WorkspacePage({ kind, onCreate }: { kind: PageKind; onCreate: ()
     setLoading(true);
     const schedule = (active: boolean) => {
       if (disposed) return;
-      const delay = document.hidden ? 60000 : kind === "queue" && active ? 3000 : kind === "queue" ? 12000 : 30000;
+      const delay = document.hidden ? 60000 : kind === "queue" && active ? 3000 : kind === "queue" ? 15000 : 30000;
       timer = window.setTimeout(poll, delay);
     };
     const poll = async () => schedule(await refresh());
@@ -105,12 +119,31 @@ export function WorkspacePage({ kind, onCreate }: { kind: PageKind; onCreate: ()
       if (timer) window.clearTimeout(timer);
     };
   }, [kind]);
-  const rows = useMemo(() => jobs.filter(job => kind === "queue" ? ["queued", "running"].includes(job.status) : kind === "library" ? job.status === "completed" && job.outputPath : true).filter(job => !query || `${job.title}${engines[job.engine].name}${job.status}`.toLowerCase().includes(query.toLowerCase())), [jobs, kind, query]);
+  useEffect(() => subscribeLongformEvents(update => {
+    if (!update.items) return;
+    setJobs(previous => {
+      const merged = new Map(previous.map(job => [job.id, job]));
+      for (const item of update.items ?? []) {
+        const incoming = normalize({ ...item, source: "longform" });
+        const existing = merged.get(item.id);
+        if (!existing || Number(incoming.version) >= Number(existing.version)) merged.set(item.id, incoming);
+      }
+      return Array.from(merged.values()).sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
+    });
+  }), []);
+  const rows = useMemo(() => jobs.filter(job => kind === "library" ? job.status === "completed" && job.outputPath : true).filter(job => statusFilter === "all" || (statusFilter === "active" ? runningStates.includes(job.status) : statusFilter === "recoverable" ? ["paused", "interrupted", "failed", "storage_blocked"].includes(job.status) : job.status === statusFilter)).filter(job => !query || `${job.title}${engines[job.engine].name}${job.status}`.toLowerCase().includes(query.toLowerCase())), [jobs, kind, query, statusFilter]);
   const responseError = async (response: Response, fallback: string) => {
     const payload = await response.json().catch(() => null) as { detail?: string } | null;
     return payload?.detail || fallback;
   };
-  const action = async (id: string, name: "cancel" | "retry") => { try { const response = await fetch(apiUrl(`/api/jobs/${id}/${name}`), { method: "POST" }); if (!response.ok) throw new Error(await responseError(response, "操作失败")); setCancelConfirm(null); setFeedback({ tone: "success", text: name === "cancel" ? "已请求取消任务。" : "任务已重新加入本次生成队列。" }); await refresh(); } catch (reason) { setFeedback({ tone: "error", text: reason instanceof Error ? reason.message : "操作失败" }); } };
+  const action = async (id: string, name: "cancel" | "retry" | "pause" | "resume") => {
+    try {
+      const job = jobs.find(item => item.id === id);
+      if (job?.source === "longform") { if (name !== "retry") await controlLongformJob(id, name, (path, options) => serviceRequest<LongformJob>(path, options)); else await serviceRequest(`/api/jobs/v2/${id}/retry-segments`, { method: "POST", body: { version: job.version } }); }
+      else { const response = await fetch(apiUrl(`/api/jobs/${id}/${name}`), { method: "POST" }); if (!response.ok) throw new Error(await responseError(response, "操作失败")); }
+      setCancelConfirm(null); setFeedback({ tone: "success", text: "任务操作已提交，状态将由服务确认。" }); await refresh();
+    } catch (reason) { setFeedback({ tone: "error", text: reason instanceof Error ? reason.message : "操作失败" }); }
+  };
   const deleteJob = async (job: Job, deleteOutput: boolean) => {
     if (deleting) return;
     setDeleting(true);
@@ -127,14 +160,16 @@ export function WorkspacePage({ kind, onCreate }: { kind: PageKind; onCreate: ()
     } finally { setDeleting(false); }
   };
   const resolveOutput = async (job: Job) => {
+    if (job.source === "longform") return { openPath: job.outputPath, revealPath: job.outputPath };
     const response = await fetch(apiUrl(`/api/jobs/${job.id}/output`));
     if (!response.ok) throw new Error(`无法读取输出文件（HTTP ${response.status}）`);
     const raw = await response.json() as { output?: { path?: string }; openContract?: { open?: { path?: string }; reveal?: { path?: string } } };
     return { openPath: raw.openContract?.open?.path ?? raw.output?.path ?? job.outputPath, revealPath: raw.openContract?.reveal?.path ?? raw.output?.path ?? job.outputPath };
   };
   const showOutput = async (job: Job) => { try { const output = await resolveOutput(job); if (!output.revealPath) throw new Error("输出文件不存在"); await window.langbaiDesktop?.showItemInFolder?.(output.revealPath); } catch (reason) { setError(reason instanceof Error ? reason.message : "无法打开文件位置"); } };
-  const playOutput = async (job: Job) => { try { const output = await resolveOutput(job); if (!output.openPath) throw new Error("输出文件不存在"); const url = await window.langbaiDesktop?.getAudioUrl?.(output.openPath); if (!url) throw new Error("桌面端未返回可播放地址"); setAudioUrl(url); setAudioTitle(job.title); setAudioJobId(job.id); } catch (reason) { setFeedback({ tone: "error", text: reason instanceof Error ? reason.message : "无法播放音频" }); } };
+  const playOutput = async (job: Job) => { try { if (job.source === "longform") { setAudioUrl(serviceUrl(`/api/jobs/v2/${job.id}/output`)); setAudioTitle(job.title); setAudioJobId(job.id); return; } const output = await resolveOutput(job); if (!output.openPath) throw new Error("输出文件不存在"); const url = await window.langbaiDesktop?.getAudioUrl?.(output.openPath); if (!url) throw new Error("桌面端未返回可播放地址"); setAudioUrl(url); setAudioTitle(job.title); setAudioJobId(job.id); } catch (reason) { setFeedback({ tone: "error", text: reason instanceof Error ? reason.message : "无法播放音频" }); } };
   const exportOutput = async (job: Job) => { try {
+    if (job.source === "longform") { const link = document.createElement("a"); link.href = serviceUrl(`/api/jobs/v2/${job.id}/output`); link.download = ""; link.click(); return; }
     const output = await resolveOutput(job);
     if (!output.openPath) throw new Error("输出文件不存在");
     const exported = await window.langbaiDesktop?.exportAudio?.(output.openPath);
@@ -146,9 +181,10 @@ export function WorkspacePage({ kind, onCreate }: { kind: PageKind; onCreate: ()
     {feedback && <div className={`data-feedback ${feedback.tone}`} role={feedback.tone === "error" ? "alert" : "status"}><span>{feedback.text}</span><button onClick={() => setFeedback(null)} aria-label="关闭提示"><X size={17} /></button></div>}
     {kind === "library" && rows[0]?.outputPath && !audioUrl && <div className="library-player idle"><div><FileAudio size={18} /><span><strong>快速试听</strong><small>{rows[0].title}</small></span></div><button className="secondary-button" onClick={() => playOutput(rows[0])}><Play size={17} />播放最近音频</button></div>}
     {audioUrl && <div className="library-player"><div><Play size={18} /><span><strong>正在播放</strong><small>{audioTitle}</small></span></div><audio src={audioUrl} controls autoPlay /><button onClick={() => { setAudioUrl(""); setAudioJobId(""); }} aria-label="关闭播放器"><X size={18} /></button></div>}
-    <div className="data-summary"><div><config.icon size={20} /><span><strong>{rows.length}</strong><small>{kind === "library" ? "份可用音频" : "条任务记录"}</small></span></div><div><CheckCircle2 size={20} /><span><strong>{jobs.filter(job => job.status === "completed").length}</strong><small>已完成</small></span></div><div><Clock3 size={20} /><span><strong>{jobs.filter(job => ["queued", "running"].includes(job.status)).length}</strong><small>进行中</small></span></div></div>
+    <div className="data-summary"><div><config.icon size={20} /><span><strong>{rows.length}</strong><small>{kind === "library" ? "份可用音频" : "条任务记录"}</small></span></div><div><CheckCircle2 size={20} /><span><strong>{jobs.filter(job => job.status === "completed").length}</strong><small>已完成</small></span></div><div><Clock3 size={20} /><span><strong>{jobs.filter(job => runningStates.includes(job.status)).length}</strong><small>进行中</small></span></div></div>
+    {kind !== "library" && <div className="p1-task-filters">{[{ id: "all", name: "全部任务" }, { id: "active", name: "进行中" }, { id: "recoverable", name: "待恢复 / 失败" }, { id: "completed", name: "已完成" }, { id: "cancelled", name: "已取消" }].map(filter => <button key={filter.id} aria-pressed={statusFilter === filter.id} onClick={() => setStatusFilter(filter.id)}>{filter.name}</button>)}</div>}
     <section className="data-surface">
-      {loading ? <div className="page-state"><LoaderCircle className="spin" size={30} /><strong>正在读取本地任务</strong><span>这通常只需要几秒钟。</span></div> : error ? <div className="page-state error"><AlertCircle size={30} /><strong>加载失败</strong><span>{error}</span><button className="secondary-button" onClick={refresh}><RefreshCw size={17} />重试</button></div> : rows.length === 0 ? <div className="page-state"><config.icon size={34} /><strong>{query ? "没有匹配结果" : kind === "library" ? "还没有完成的音频" : kind === "queue" ? "当前没有生成任务" : "暂无历史记录"}</strong><span>{query ? "尝试更换搜索词。" : "从创作台创建第一个语音任务。"}</span>{!query && <button className="primary-button" onClick={onCreate}>前往创作台</button>}</div> : <div className="data-table"><div className="data-table-head"><span>任务</span><span>引擎</span><span>状态 / 进度</span><span>更新时间</span><span>操作</span></div>{rows.map(job => <article className="data-row" key={job.id}><div className="data-job"><span className="data-job-icon"><FileAudio size={18} /></span><span><strong title={job.title}>{job.title}</strong><small title={job.outputPath}>{job.segmentsTotal ? `${job.segmentsDone}/${job.segmentsTotal} 个分段${job.acceleration ? ` · ${job.acceleration}` : ""}` : job.outputPath || "等待处理"}</small></span></div><span className="engine-pill">{engines[job.engine].name}</span><div className="data-progress"><div><span className={`status-dot ${job.status}`} />{statusLabel(job.status)}<strong>{job.progress}%</strong></div><div className="progress-track"><i style={{ width: `${job.progress}%` }} /></div>{job.error && <small title={job.error}>{job.error}</small>}</div><time>{formatDate(job.updatedAt || job.createdAt)}</time><div className="row-actions">{job.status === "completed" && job.outputPath && <button onClick={() => playOutput(job)} title="试听音频" aria-label={`试听 ${job.title}`}><Play size={17} /></button>}{kind === "library" && job.outputPath && <button onClick={() => exportOutput(job)} title="导出音频副本" aria-label={`导出 ${job.title}`}><Download size={17} /></button>}{job.outputPath && <button onClick={() => showOutput(job)} title="打开文件位置" aria-label={`打开 ${job.title} 的文件位置`}><FolderOpen size={17} /></button>}{["queued", "running"].includes(job.status) && <button onClick={() => setCancelConfirm({ id: job.id, title: job.title })} title="取消任务" aria-label={`取消 ${job.title}`}><Square size={16} /></button>}{["failed", "cancelled"].includes(job.status) && <button onClick={() => action(job.id, "retry")} title="重试" aria-label={`重试 ${job.title}`}><RotateCcw size={17} /></button>}{job.outputPath && <button onClick={() => navigator.clipboard.writeText(job.outputPath!)} title="复制路径" aria-label={`复制 ${job.title} 的路径`}><Copy size={17} /></button>}{!["queued", "running"].includes(job.status) && <button className="delete-row-button" onClick={() => setDeleteConfirm(job)} title="删除记录" aria-label={`删除 ${job.title}`}><Trash2 size={17} /></button>}</div></article>)}</div>}
+      {loading ? <div className="page-state"><LoaderCircle className="spin" size={30} /><strong>正在读取本地任务</strong><span>这通常只需要几秒钟。</span></div> : error ? <div className="page-state error"><AlertCircle size={30} /><strong>加载失败</strong><span>{error}</span><button className="secondary-button" onClick={refresh}><RefreshCw size={17} />重试</button></div> : rows.length === 0 ? <div className="page-state"><config.icon size={34} /><strong>{query ? "没有匹配结果" : kind === "library" ? "还没有完成的音频" : kind === "queue" ? "当前没有生成任务" : "暂无历史记录"}</strong><span>{query ? "尝试更换搜索词。" : "从创作台创建第一个语音任务。"}</span>{!query && <button className="primary-button" onClick={onCreate}>前往创作台</button>}</div> : <div className="data-table"><div className="data-table-head"><span>任务</span><span>引擎</span><span>状态 / 进度</span><span>更新时间</span><span>操作</span></div>{rows.map(job => <article className="data-row" key={job.id}><div className="data-job"><span className="data-job-icon"><FileAudio size={18} /></span><span><strong title={job.title}>{job.title}</strong><small title={job.outputPath}>{job.segmentsTotal ? `${job.segmentsDone}/${job.segmentsTotal} 个分段${job.acceleration ? ` · ${job.acceleration}` : ""}` : job.outputPath || "等待处理"}</small></span></div><span className="engine-pill">{engines[job.engine].name}<small className="task-origin">{job.source === "longform" ? "长文 v2" : "原生 / 多人"}</small></span><div className="data-progress"><div><span className={`status-dot ${job.status}`} />{statusLabel(job.phase || job.status)}<strong>{job.progress}%</strong></div><div className="progress-track"><i style={{ width: `${job.progress}%` }} /></div>{job.error && <small title={job.error}>{job.error}</small>}</div><time>{formatDate(job.updatedAt || job.createdAt)}</time><div className="row-actions">{job.source === "longform" && <button title="查看分段与恢复详情" aria-label={`查看 ${job.title} 的任务详情`} onClick={() => onOpenLongform?.(job.id)}><ChevronRight size={17} /></button>}{job.source === "longform" && ["paused", "interrupted", "storage_blocked"].includes(job.status) && <button title="继续任务" onClick={() => void action(job.id, "resume")}><Play size={16} /></button>}{job.source === "longform" && ["generating", "loading", "warming"].includes(job.status) && <button title="段后暂停" onClick={() => void action(job.id, "pause")}><Pause size={16} /></button>}{job.status === "completed" && job.outputPath && <button onClick={() => playOutput(job)} title="试听音频" aria-label={`试听 ${job.title}`}><Play size={17} /></button>}{kind === "library" && job.outputPath && <button onClick={() => exportOutput(job)} title="导出音频副本" aria-label={`导出 ${job.title}`}><Download size={17} /></button>}{job.outputPath && <button onClick={() => showOutput(job)} title="打开文件位置" aria-label={`打开 ${job.title} 的文件位置`}><FolderOpen size={17} /></button>}{runningStates.includes(job.status) && <button onClick={() => setCancelConfirm({ id: job.id, title: job.title })} title="取消任务" aria-label={`取消 ${job.title}`}><Square size={16} /></button>}{(job.status === "failed" || job.source === "legacy" && job.status === "cancelled") && <button onClick={() => action(job.id, "retry")} title="重试" aria-label={`重试 ${job.title}`}><RotateCcw size={17} /></button>}{job.outputPath && <button onClick={() => navigator.clipboard.writeText(job.outputPath!)} title="复制路径" aria-label={`复制 ${job.title} 的路径`}><Copy size={17} /></button>}{job.source === "legacy" && !runningStates.includes(job.status) && <button className="delete-row-button" onClick={() => setDeleteConfirm(job)} title="删除记录" aria-label={`删除 ${job.title}`}><Trash2 size={17} /></button>}</div></article>)}</div>}
     </section>
     {cancelConfirm && <div className="confirm-overlay" role="presentation"><div className="confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="cancel-confirm-title"><span className="confirm-icon"><Pause size={22} /></span><h2 id="cancel-confirm-title">取消这个生成任务？</h2><p>“{cancelConfirm.title}”已完成的分段会保留，之后可以从断点重试。</p><div><button className="secondary-button" onClick={() => setCancelConfirm(null)}>继续生成</button><button className="danger-button" onClick={() => action(cancelConfirm.id, "cancel")}>确认取消</button></div><button className="confirm-close" onClick={() => setCancelConfirm(null)} aria-label="关闭"><X size={18} /></button></div></div>}
     {deleteConfirm && <div className="confirm-overlay" role="presentation"><div className="confirm-dialog delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-confirm-title"><span className="confirm-icon danger"><Trash2 size={22} /></span><h2 id="delete-confirm-title">删除“{deleteConfirm.title}”？</h2><p>{deleteConfirm.outputPath ? "请选择是否同时删除已生成的本地音频。此操作无法撤销。" : "此任务没有可用音频，将只删除任务记录。此操作无法撤销。"}</p><div className="delete-choice-list">{deleteConfirm.outputPath && <button className="delete-choice preserve" disabled={deleting} onClick={() => deleteJob(deleteConfirm, false)}><span><strong>仅删除记录</strong><small>保留 output 目录中的音频文件</small></span></button>}<button className="delete-choice destructive" disabled={deleting} onClick={() => deleteJob(deleteConfirm, Boolean(deleteConfirm.outputPath))}><Trash2 size={18} /><span><strong>{deleteConfirm.outputPath ? "记录和音频一起删除" : "删除任务记录"}</strong><small>{deleteConfirm.outputPath ? "同时永久删除本地 WAV 文件" : "不会删除其他本地文件"}</small></span></button></div><button className="secondary-button delete-cancel" disabled={deleting} onClick={() => setDeleteConfirm(null)}>取消</button><button className="confirm-close" disabled={deleting} onClick={() => setDeleteConfirm(null)} aria-label="关闭"><X size={18} /></button></div></div>}

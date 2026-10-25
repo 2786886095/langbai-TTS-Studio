@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "kind": "Public summary of a local generation and deliberate recovery acceptance run",
+  "sourceVerification": "runtime-smoke/breeze-real-10000-20261025/verification.json",
+  "sourceVerificationSha256": "0b7bb845a9b680bd67b84f6457ffb0b59ebfa12e2ccd6291baefbb5db1c0eb55",
+  "clickAtHongKong": "2026-10-25T18:37:42.739+08:00",
+  "completedAtHongKong": "2026-10-25T19:08:52.121813+08:00",
+  "clickToCompleteUtcSeconds": 1869.382813,
+  "totalGlobalMonotonicSeconds": null,
+  "timing": {
+    "totalWallSeconds": 1869.086968,
+    "activeSeconds": 1716.812,
+    "generationSeconds": 1495.515,
+    "preparingSeconds": 88.69,
+    "loadingSeconds": 92.484,
+    "warmingSeconds": 34.438,
+    "pauseSeconds": 152.237763,
+    "unknownSeconds": 0,
+    "clockAnomaly": false
+  },
+  "source": {
+    "rawCharacters": 11224,
+    "rawHan": 10000,
+    "rawSha256": "233f5d9c37343d188ff5fa98f41288c17afed980a89d020718e1feb8e7976131",
+    "acceptedSegments": 92,
+    "exactSourceCoverage": true,
+    "requestsExactlyEqualToPrevious92": true
+  },
+  "counts": {
+    "scheduled": 92,
+    "modelCalls": 92,
+    "modelRetries": 0,
+    "ioRecoveries": 0,
+    "coldWorkerInstances": 2
+  },
+  "recoveryAcceptance": {
+    "first10SegmentHashesPreserved": true,
+    "first10AttemptCountsPreserved": true,
+    "first10PathsPreserved": true,
+    "reportedBy": "Primary task before/after recovery verification"
+  },
+  "output": {
+    "format": "WAV PCM16",
+    "sampleRate": 24000,
+    "channels": 1,
+    "frames": 58394160,
+    "durationSeconds": 2433.09,
+    "bytes": 116788364,
+    "sha256": "d7224bc045494c6c0d60bdebb2ca407a64faccb4b685431824cd260503015349",
+    "allSegmentAndOutputHashesValid": true,
+    "allAcceptedUntruncated": true,
+    "exactMergedFrames": true
+  },
+  "priorRunComparison": {
+    "segmentsWithEqualWavBytes": 82,
+    "totalSegments": 92,
+    "differentSegments": "first 10",
+    "qualityEquivalenceEstablished": false,
+    "exactSpokenTranscriptVerified": false
+  },
+  "limitations": [
+    "The wall time includes a deliberate pause, backend restart and recovery validation; this is not an uninterrupted speed benchmark.",
+    "There is no continuous global monotonic timer across the backend restart; the global monotonic field remains null.",
+    "File, frame and metadata verification does not establish word-for-word pronunciation accuracy.",
+    "This summary does not include model weights, reference recordings, source novel text or generated audio."
+  ]
+}

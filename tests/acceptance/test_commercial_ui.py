@@ -71,8 +71,10 @@ def test_versioned_gpt_defaults_and_parameter_presets_are_reachable(project_root
     require_commercial_gate(commercial_release)
     app_source = (project_root / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")
     schema_source = (project_root / "frontend" / "src" / "parameterSchemas.ts").read_text(encoding="utf-8")
+    mapping_source = (project_root / "frontend" / "src" / "parameterMapping.ts").read_text(encoding="utf-8")
     worker_source = (project_root / "backend" / "engine_worker.py").read_text(encoding="utf-8")
-    assert "resolveGptSovitsVersion" in app_source and "sample_steps_auto" in app_source, "前端必须按 GPT-SoVITS 版本维护自动默认值"
+    assert "resolveGptSovitsVersion" in app_source and re.search(r"params:\s*toApiParams\(engine,\s*currentParams\)", app_source), "创作台必须通过共享参数映射提交实际推理参数"
+    assert "gptSovitsDefaultsFor(clean)" in mapping_source and re.search(r"sample_steps_auto:\s*Number\(rest\.sample_steps\)\s*===\s*versionDefaults\.sample_steps", mapping_source), "共享参数映射必须按 GPT-SoVITS 当前版本默认采样步数标记自动模式"
     assert 'version === "v3" ? 32 : 8' in schema_source, "v3 与 v4 的采样默认值必须明确区分"
     assert "loaded_version" in worker_source and "recommended_gpt_sovits_sample_steps" in worker_source, "实际加载的权重版本必须在推理前二次校正默认值"
     assert "langbai-parameter-presets-v1" in app_source, "参数预设必须跨项目、跨重启持久保存"

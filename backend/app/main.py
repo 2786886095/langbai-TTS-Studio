@@ -3,14 +3,17 @@ from __future__ import annotations
 import json
 import os
 import queue
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
 from typing import Iterator
 
-from fastapi import FastAPI, HTTPException, Query, status
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from .adapters import MockAdapter, build_default_adapters
@@ -37,6 +40,14 @@ from .voices import (
     VoiceProfileStore,
     VoiceProfileUpdate,
 )
+from .breeze_binding import BreezeBindingRequest, BreezeBindingStore
+from .breeze_voices import BreezeVoiceCreate, BreezeVoiceStore, CompositeVoiceStore
+from .adapters.breeze import BreezeAdapter
+from .longform import LongformManager, build_router as build_longform_router
+from .longform.models import LongformConflict
+from .service_runtime import DeviceCoordinator, LocalServiceMiddleware, ServiceInstance, SERVICE_VERSION
+from .legacy_migration import LegacyMigration
+from . import breeze_web_bridge
 from .workspace import (
     PROJECT_SCHEMA_VERSION,
     SETTINGS_SCHEMA_VERSION,
@@ -85,6 +96,10 @@ def create_app(*, adapters=None, data_dir: str | Path | None = None, mock_mode: 
         or ((root / "output") if explicit_data_dir else (BACKEND_ROOT.parent / "output"))
     ).resolve()
     managed_install_root = Path(os.getenv("LANGBAI_INSTALL_ROOT") or (root / "managed")).resolve()
+    # Reserve before constructors open SQLite or recover installer/training
+    # records. A rejected second factory must not mutate the running service.
+    service = ServiceInstance(root)
+    service.acquire()
     bindings = EngineBindingStore(root / "engine-bindings.json")
     if adapters is None:
         if mock_mode:
@@ -109,19 +124,45 @@ def create_app(*, adapters=None, data_dir: str | Path | None = None, mock_mode: 
         root / "training", adapters, BACKEND_ROOT / "training_worker.py", mock_mode=mock_mode,
         gpt_worker_path=BACKEND_ROOT / "gpt_workbench_worker.py",
     )
+    breeze_bindings = BreezeBindingStore(root / "v2" / "breeze-binding.json")
+    breeze_voices = BreezeVoiceStore(root / "v2" / "breeze-voices")
+    all_adapters = dict(adapters)
+    if "breeze" not in all_adapters:
+        all_adapters["breeze"] = (MockAdapter("breeze") if mock_mode else
+            BreezeAdapter(breeze_bindings, root / "v2" / "staging", root / "logs" / "breeze",
+                          worker_path=BACKEND_ROOT / "breeze_worker.py"))
+    devices = DeviceCoordinator(all_adapters)
+    devices.wire_legacy(manager, training)
+    migration = LegacyMigration(root, manager.store)
+    ffmpeg_tool = next((tool for tool in installer.tools_payload() if tool["id"] == "ffmpeg" and tool["installed"]), None)
+    ffmpeg_path = ffmpeg_tool["executables"].get("bin/ffmpeg.exe") if ffmpeg_tool else None
+    longform = LongformManager(root / "v2", all_adapters,
+        voice_store=CompositeVoiceStore(voices, breeze_voices), legacy_manager=manager,
+        acquire_gpu=devices.acquire, ffmpeg_path=ffmpeg_path,
+        on_terminal=migration.compat_export)
+    migration.longform = longform
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        manager.start()
-        installer.start()
+        service.acquire()
         try:
+            migration.prepare()
+            recover_breeze = getattr(all_adapters["breeze"], "recover_owned_worker", None)
+            if callable(recover_breeze):
+                recover_breeze()
+            manager.start()
+            longform.start()
+            installer.start()
             yield
         finally:
+            longform.close()
+            all_adapters["breeze"].close()
             training.close()
             manager.close()
             installer.close()
+            service.release()
 
-    api = FastAPI(title="langbai TTS Studio API", version="1.2.12", lifespan=lifespan)
+    api = FastAPI(title="langbai TTS Studio API", version=SERVICE_VERSION, lifespan=lifespan)
     api.state.manager = manager
     api.state.installer = installer
     api.state.projects = projects
@@ -132,21 +173,172 @@ def create_app(*, adapters=None, data_dir: str | Path | None = None, mock_mode: 
     api.state.bindings = bindings
     api.state.adapters = adapters
     api.state.training = training
+    api.state.longform = longform
+    api.state.service = service
+    api.state.devices = devices
+    api.state.breeze_bindings = breeze_bindings
+    api.state.breeze_voices = breeze_voices
+    api.state.migration = migration
     api.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost", "http://127.0.0.1", "null"],
-        allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+        allow_origins=[f"http://{host}:{port}" for host in ("localhost", "127.0.0.1")
+                       for port in (service.port, 5173, 7862)],
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    api.add_middleware(LocalServiceMiddleware, instance=service,
+                       testing=bool(mock_mode or os.getenv("PYTEST_CURRENT_TEST")))
+    # Static v2 paths must be registered ahead of the legacy /jobs/{job_id}.
+    api.include_router(build_longform_router(longform))
+
+    def accepting_work_route(handler):
+        @wraps(handler)
+        def guarded(*args, **kwargs):
+            try:
+                with longform.accepting_work():
+                    return handler(*args, **kwargs)
+            except LongformConflict as exc:
+                raise HTTPException(409, str(exc)) from exc
+        return guarded
+
+    @api.get("/api/session")
+    def session(response: Response):
+        response.set_cookie("langbai_session", service.csrf_token, httponly=True, samesite="strict")
+        return {"csrfToken": service.csrf_token, **service.snapshot()}
+
+    @api.get("/api/gpu/lease")
+    def gpu_lease():
+        residents = []
+        for engine_id, adapter in all_adapters.items():
+            snapshot = getattr(adapter, "runtime_snapshot", None)
+            runtime = snapshot(1) if callable(snapshot) else {}
+            if runtime.get("running") or runtime.get("exitConfirmed") is False:
+                residents.append({"id": engine_id, "running": runtime.get("running", False),
+                                  "warmed": runtime.get("warmed"), "phase": runtime.get("phase")})
+        return {"owner": devices.snapshot(), "residents": residents}
+
+    @api.get("/api/breeze/web-runtime")
+    def external_breeze_runtime():
+        return breeze_web_bridge.status()
+
+    @api.post("/api/breeze/web-unload")
+    def unload_external_breeze():
+        try:
+            return breeze_web_bridge.unload()
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @api.get("/api/longform/migration")
+    def migration_status():
+        return migration.snapshot()
+
+    @api.get("/api/breeze/binding")
+    def breeze_binding():
+        return {"binding": breeze_bindings.get(),
+                "defaults": BreezeBindingRequest().model_dump(by_alias=True),
+                "status": all_adapters["breeze"].status()}
+
+    @api.get("/api/breeze/runtime")
+    def breeze_runtime():
+        return getattr(all_adapters["breeze"], "runtime_snapshot", lambda: all_adapters["breeze"].status())()
+
+    @api.post("/api/breeze/unload")
+    def unload_breeze():
+        owner = f"manual:breeze:unload:{uuid.uuid4().hex}"
+        try:
+            devices.reserve(owner, "breeze", wait=False)
+            all_adapters["breeze"].close()
+            result = breeze_runtime()
+            if result.get("exitConfirmed") is False:
+                raise RuntimeError("尚未确认 worker 退出，请检查诊断信息")
+            return {"ok": True, "runtime": result}
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+        finally:
+            devices.release(owner)
+
+    @api.put("/api/breeze/binding")
+    def bind_breeze(request: BreezeBindingRequest):
+        owner = f"manual:breeze:bind:{uuid.uuid4().hex}"
+        try:
+            devices.reserve(owner, "breeze", wait=False)
+            all_adapters["breeze"].close()
+            runtime = getattr(all_adapters["breeze"], "runtime_snapshot", lambda: {})()
+            if runtime.get("exitConfirmed") is False:
+                raise HTTPException(409, "Breeze 旧实例尚未确认退出，不能修改绑定")
+            return breeze_bindings.bind(request)
+        except (ValueError, OSError, RuntimeError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+        finally:
+            devices.release(owner)
+
+    @api.get("/api/breeze/voices")
+    def list_breeze_voices():
+        return {"items": [v.model_dump(mode="json") for v in breeze_voices.list()]}
+
+    @api.post("/api/breeze/voices", status_code=201)
+    def create_breeze_voice(request: BreezeVoiceCreate):
+        return breeze_voices.create(request).model_dump(mode="json")
+
+    @api.put("/api/breeze/voices/{voice_id}")
+    def update_breeze_voice(voice_id: str, request: BreezeVoiceCreate):
+        try:
+            return breeze_voices.update(voice_id, request).model_dump(mode="json")
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @api.delete("/api/breeze/voices/{voice_id}", status_code=204)
+    def delete_breeze_voice(voice_id: str):
+        try:
+            breeze_voices.delete(voice_id)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        return Response(status_code=204)
+
+    @api.post("/api/service/prepare-exit")
+    def prepare_exit(request: dict):
+        mode = request.get("mode", "pause")
+        if mode not in {"pause", "stop", "background"}:
+            raise HTTPException(422, "退出方式无效")
+        if mode == "background":
+            service.started_by = "headless"
+            return {"ok": True, "background": True}
+        for job in longform.list():
+            if job["status"] in {"queued", "acquiring_gpu", "preparing", "loading", "warming", "generating", "pausing"}:
+                longform.action(job["id"], "pause" if mode == "pause" else "stop",
+                                mode="after_segment" if mode == "pause" else "now")
+        return {"ok": True, "waiting": any(j["status"] in {"generating", "pausing", "preparing", "loading", "warming", "merging", "exporting", "verifying"} for j in longform.list())}
+
+    @api.post("/api/service/stop")
+    def stop_service(background: BackgroundTasks):
+        shutdown = getattr(api.state, "request_shutdown", None)
+        if not callable(shutdown):
+            raise HTTPException(409, "当前宿主没有提供停止接口")
+        previous_draining = longform.begin_draining()
+        try:
+            jobs = longform.list()
+            if any(j["status"] in {"merging", "exporting", "verifying"} for j in jobs):
+                raise HTTPException(409, "成品正在合并、导出或校验，请等待发布完成后再停止服务")
+            for job in jobs:
+                if job["status"] in {"queued", "acquiring_gpu", "preparing", "loading", "warming", "generating", "pausing"}:
+                    longform.action(job["id"], "stop", mode="now")
+            all_adapters["breeze"].close()
+            runtime = breeze_runtime()
+            if runtime.get("exitConfirmed") is False:
+                raise HTTPException(409, "Breeze 进程尚未确认退出，服务将保留供诊断")
+            background.add_task(shutdown)
+            return {"ok": True, "status": "stopping", "detail": "已保存的分段会保留，活动任务下次可恢复"}
+        except Exception:
+            longform.restore_draining(previous_draining)
+            raise
 
     @api.get("/health")
     def health():
         snapshots = [adapter.status() for adapter in manager.adapters.values()]
         return {
             "status": "ok" if all(item.get("available") for item in snapshots) else "degraded",
-            "service": "langbai-TTS-Studio", "engines": snapshots,
+            "service": "langbai-TTS-Studio-v2", "engines": snapshots, **service.snapshot(),
         }
 
     @api.get("/api/engines")
@@ -159,44 +351,68 @@ def create_app(*, adapters=None, data_dir: str | Path | None = None, mock_mode: 
 
     @api.get("/api/engines/status")
     def engine_status():
-        return [adapter.status() for adapter in manager.adapters.values()]
+        items = [adapter.status() for adapter in manager.adapters.values()]
+        if breeze_bindings.get():
+            items.append(all_adapters["breeze"].status())
+        return items
 
     @api.get("/api/runtime/engines")
     def runtime_engines(lines: int = Query(default=160, ge=20, le=500)):
         items = []
-        for adapter in manager.adapters.values():
+        visible_adapters = dict(manager.adapters)
+        if breeze_bindings.get():
+            visible_adapters["breeze"] = all_adapters["breeze"]
+        for adapter in visible_adapters.values():
             snapshot = getattr(adapter, "runtime_snapshot", None)
             items.append(snapshot(lines) if callable(snapshot) else {**adapter.status(), "running": False, "pid": None, "command": [], "cwd": "", "logPath": "", "logLines": []})
         return {"items": items}
 
     def runtime_adapter(engine_id: str):
-        adapter = manager.adapters.get(engine_id)
+        adapter = all_adapters.get(engine_id)
         if adapter is None:
             raise HTTPException(status_code=404, detail="引擎不存在")
         return adapter
 
     @api.post("/api/runtime/engines/{engine_id}/start")
+    @accepting_work_route
     def start_runtime_engine(engine_id: str):
         adapter = runtime_adapter(engine_id)
         start = getattr(adapter, "start", None)
         if not callable(start):
             raise HTTPException(status_code=409, detail="该引擎不支持手动启动")
+        owner = f"manual:{engine_id}:start:{uuid.uuid4().hex}"
         try:
+            devices.reserve(owner, engine_id, wait=False)
             start()
             return {"ok": True, "action": "start", "engine": engine_id}
         except Exception as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        finally:
+            devices.release(owner)
 
     @api.post("/api/runtime/engines/{engine_id}/stop")
     def stop_runtime_engine(engine_id: str):
-        runtime_adapter(engine_id).close()
-        return {"ok": True, "action": "stop", "engine": engine_id}
+        owner = f"manual:{engine_id}:stop:{uuid.uuid4().hex}"
+        try:
+            devices.reserve(owner, engine_id, wait=False)
+            runtime_adapter(engine_id).close()
+            runtime = getattr(runtime_adapter(engine_id), "runtime_snapshot", lambda: {})()
+            if runtime.get("exitConfirmed") is False:
+                raise RuntimeError("尚未确认模型退出，请查看诊断")
+            return {"ok": True, "action": "stop", "engine": engine_id}
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+        finally:
+            devices.release(owner)
 
     @api.post("/api/runtime/engines/{engine_id}/restart")
+    @accepting_work_route
     def restart_runtime_engine(engine_id: str):
         adapter = runtime_adapter(engine_id)
         restart = getattr(adapter, "restart", None)
+        owner = f"manual:{engine_id}:restart:{uuid.uuid4().hex}"
         try:
+            devices.reserve(owner, engine_id, wait=False)
             if callable(restart):
                 restart()
             else:
@@ -208,6 +424,8 @@ def create_app(*, adapters=None, data_dir: str | Path | None = None, mock_mode: 
             return {"ok": True, "action": "restart", "engine": engine_id}
         except Exception as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        finally:
+            devices.release(owner)
 
     @api.get("/api/runtime/activity")
     def runtime_activity():
@@ -217,10 +435,15 @@ def create_app(*, adapters=None, data_dir: str | Path | None = None, mock_mode: 
             row = snapshot(20) if callable(snapshot) else {**adapter.status(), "running": False, "pid": None}
             if row.get("running"):
                 engine_rows.append({"id": row.get("id"), "pid": row.get("pid"), "state": row.get("state")})
+        breeze_runtime = getattr(all_adapters["breeze"], "runtime_snapshot", lambda: {})()
+        if breeze_runtime.get("running") or breeze_runtime.get("phase") == "stop_unconfirmed":
+            engine_rows.append({"id": "breeze", "pid": breeze_runtime.get("pid"), "state": breeze_runtime.get("phase")})
         job_rows = [
             {"id": job.id, "title": job.title, "status": job.status.value}
             for job in manager.list() if job.status.value in {"queued", "running"}
         ]
+        job_rows.extend({"id": j["id"], "title": j["title"], "status": j["status"], "kind": "longform"}
+                        for j in longform.list() if j["status"] in {"queued", "acquiring_gpu", "preparing", "loading", "warming", "generating", "pausing", "merging", "exporting", "verifying"})
         training_rows = training.active_summary()
         return {
             "active": bool(engine_rows or job_rows or training_rows),
@@ -232,6 +455,9 @@ def create_app(*, adapters=None, data_dir: str | Path | None = None, mock_mode: 
         jobs = [job for job in manager.list() if job.status.value in {"queued", "running"}]
         for job in jobs:
             manager.cancel(job.id)
+        for job in longform.list():
+            if job["status"] in {"queued", "acquiring_gpu", "preparing", "loading", "warming", "generating", "pausing"}:
+                longform.action(job["id"], "stop", mode="now")
         training.terminate_active(wait=False)
         return {"ok": True, "cancelledJobs": len(jobs), "stoppingTraining": len(training.active_summary())}
 
@@ -244,6 +470,7 @@ def create_app(*, adapters=None, data_dir: str | Path | None = None, mock_mode: 
         return training.gpt_workbench_status()
 
     @api.post("/api/training/gpt-sovits/workbench/start")
+    @accepting_work_route
     def start_gpt_sovits_training_workbench():
         try:
             return training.start_gpt_workbench()
@@ -260,6 +487,7 @@ def create_app(*, adapters=None, data_dir: str | Path | None = None, mock_mode: 
         return {"items": items, "total": len(items)}
 
     @api.post("/api/training/tasks", status_code=status.HTTP_202_ACCEPTED)
+    @accepting_work_route
     def create_training_task(request: VoxTrainingCreate):
         try:
             return training.create(request)
@@ -281,6 +509,7 @@ def create_app(*, adapters=None, data_dir: str | Path | None = None, mock_mode: 
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @api.post("/api/training/tasks/{task_id}/resume")
+    @accepting_work_route
     def resume_training_task(task_id: str):
         try:
             return training.resume(task_id)
@@ -298,6 +527,7 @@ def create_app(*, adapters=None, data_dir: str | Path | None = None, mock_mode: 
         return [_job_payload(job) for job in manager.list()]
 
     @api.post("/api/jobs", status_code=status.HTTP_202_ACCEPTED)
+    @accepting_work_route
     def create_job(request: JobCreate):
         try:
             return _job_payload(manager.create(request))
@@ -316,6 +546,7 @@ def create_app(*, adapters=None, data_dir: str | Path | None = None, mock_mode: 
         }
 
     @api.post("/api/jobs/multi-speaker", status_code=status.HTTP_202_ACCEPTED)
+    @accepting_work_route
     def create_multi_speaker_job(request: MultiSpeakerJobCreate):
         try:
             return _job_payload(manager.create_multi_speaker(request))
@@ -340,6 +571,7 @@ def create_app(*, adapters=None, data_dir: str | Path | None = None, mock_mode: 
             raise HTTPException(status_code=404, detail="任务不存在") from exc
 
     @api.post("/api/jobs/{job_id}/retry", status_code=status.HTTP_202_ACCEPTED)
+    @accepting_work_route
     def retry_job(job_id: str):
         try:
             return _job_payload(manager.retry(job_id))
@@ -896,7 +1128,33 @@ def create_app(*, adapters=None, data_dir: str | Path | None = None, mock_mode: 
             },
         }
 
+    frontend_root = Path(os.getenv("LANGBAI_FRONTEND_ROOT") or (BACKEND_ROOT.parent / "frontend" / "dist"))
+
+    @api.get("/longform")
+    def longform_page(embed: str = "0"):
+        return RedirectResponse(f"/studio/?longform=1&embed={embed}")
+
+    if frontend_root.is_dir():
+        api.mount("/studio", StaticFiles(directory=str(frontend_root), html=True), name="studio")
+
     return api
 
 
-app = create_app()
+class LazyServiceApplication:
+    """Keep imports side-effect free; reserve storage when the ASGI app is used."""
+    def __init__(self):
+        self.application = None
+        import threading
+        self.lock = threading.Lock()
+
+    def _get(self):
+        with self.lock:
+            if self.application is None:
+                self.application = create_app()
+            return self.application
+
+    async def __call__(self, scope, receive, send):
+        await self._get()(scope, receive, send)
+
+
+app = LazyServiceApplication()

@@ -78,7 +78,7 @@ function StateBadge({ value }: { value: ComponentState }) {
   return <span className={`install-state ${value.installed ? "installed" : value.state === "checking" ? "checking" : "missing"}`}>{value.installed ? <CheckCircle2 size={13} /> : value.state === "checking" ? <LoaderCircle className="spin" size={13} /> : <Circle size={13} />}{value.state === "bound" ? "已绑定" : value.installed ? "已安装" : value.state === "checking" ? "检测中" : "未安装"}</span>;
 }
 
-export function EngineManager({ onBack, density, onDensityChange }: { onBack: () => void; density: "comfortable" | "compact"; onDensityChange: () => void }) {
+export function EngineManager({ onBack, density, onDensityChange, viewMode = "all" }: { onBack: () => void; density: "comfortable" | "compact"; onDensityChange: () => void; viewMode?: "all" | "engines" | "preferences" }) {
   const [items, setItems] = useState<InstallEngine[]>(() => engineOrder.map(id => normalizeEngine({}, id)));
   const [transfers, setTransfers] = useState<Transfer[]>([]);
   const [selectedEngine, setSelectedEngine] = useState<EngineId>("indextts2");
@@ -233,8 +233,8 @@ export function EngineManager({ onBack, density, onDensityChange }: { onBack: ()
     return { ...current, [selectedEngine]: next };
   });
 
-  return <div className="manager-page">
-    <header className="manager-topbar"><div><button className="back-link" onClick={onBack}><ChevronRight size={14} />返回创作台</button><p className="eyebrow">设置与路径</p><h1>引擎管理</h1><p>先扫描并绑定已有程序；没有本地引擎时，再安装源码、独立 Python 环境和模型权重。</p></div><button className="secondary-button" onClick={() => void scanLocal(false)} disabled={loading}><RefreshCw className={loading ? "spin" : ""} size={16} />快速扫描本地程序</button></header>
+  return <div className={`manager-page mode-${viewMode}`}>
+    <header className="manager-topbar"><div><button className="back-link" onClick={onBack}><ChevronRight size={14} />返回创作台</button><p className="eyebrow">设置与路径</p><h1>{viewMode === "preferences" ? "设置与路径" : "引擎管理"}</h1><p>{viewMode === "preferences" ? "管理界面密度、输出目录、更新和诊断。" : "先绑定已有程序，或安装独立的源码、Python 环境和模型。"}</p></div>{viewMode !== "preferences" && <button className="secondary-button" onClick={() => void scanLocal(false)} disabled={loading}><RefreshCw className={loading ? "spin" : ""} size={16} />快速扫描本地程序</button>}</header>
     {message && <div className="manager-notice"><AlertTriangle size={16} /><span>{message}</span><button onClick={() => setMessage("")} aria-label="关闭提示"><X size={14} /></button></div>}
     <div className="manager-body">
       <aside className="manager-engines"><div className="manager-section-title"><strong>本地语音引擎</strong><span>3 个项目</span></div>{items.map(item => <button key={item.id} className={selectedEngine === item.id ? "active" : ""} onClick={() => setSelectedEngine(item.id)}><span className="manager-engine-icon"><Cpu size={19} /></span><span><strong>{item.name}</strong><small>{item.origin === "bound" ? "本地程序已绑定" : item.source.installed && item.environment.installed ? "源码与环境已就绪" : "需要配置"}</small></span><ChevronRight size={16} /></button>)}</aside>
