@@ -1,10 +1,10 @@
 {
   "name": "langbai-tts-studio",
-  "version": "1.2.12",
+  "version": "1.3.0",
   "private": true,
   "license": "MIT",
   "author": "langbai-TTS-Studio contributors",
-  "description": "Windows desktop studio for IndexTTS, VoxCPM and GPT-SoVITS",
+  "description": "Windows desktop studio for IndexTTS, VoxCPM, GPT-SoVITS and locally bound Breeze TTS 2",
   "repository": {
     "type": "git",
     "url": "https://github.com/2786886095/langbai-TTS-Studio.git"
@@ -16,10 +16,11 @@
     "dev:electron": "wait-on tcp:127.0.0.1:5173 && electron .",
     "build:frontend": "npm --prefix frontend run build",
     "build:backend": "backend\\.venv\\Scripts\\pyinstaller.exe --noconfirm --clean --onefile --name langbai-tts-backend --distpath backend-dist --workpath build\\pyinstaller --specpath build backend\\run.py",
-    "build": "npm run build:frontend && npm run build:backend && electron-builder --win --publish never",
-    "release": "npm run build:frontend && npm run build:backend && electron-builder --win --publish always",
+    "build:stage": "node scripts/stage-desktop.cjs",
+    "build": "npm run build:frontend && npm run build:backend && npm run build:stage && electron-builder --win --publish never",
+    "release": "npm run build:frontend && npm run build:backend && npm run build:stage && electron-builder --win --publish always",
     "start": "electron .",
-    "test": "npm --prefix frontend run test --if-present"
+    "test": "npm --prefix frontend run test --if-present && node --test scripts/test-update-policy.cjs"
   },
   "devDependencies": {
     "concurrently": "^9.2.1",
@@ -31,20 +32,31 @@
     "appId": "studio.langbai.tts",
     "productName": "langbai-TTS-Studio",
     "asar": true,
+    "directories": {
+      "app": "build/desktop-app"
+    },
     "files": [
       "electron/**/*",
       "frontend/dist/**/*",
-      "package.json"
+      "package.json",
+      "LICENSE",
+      "THIRD_PARTY_NOTICES.md"
     ],
     "extraResources": [
       {
-        "from": "backend",
+        "from": "build/desktop-app/frontend/dist",
+        "to": "frontend-dist"
+      },
+      {
+        "from": "build/desktop-resources/backend",
         "to": "backend",
         "filter": [
           "engine_worker.py",
           "engine_runtime.py",
           "training_worker.py",
-          "gpt_workbench_worker.py"
+          "gpt_workbench_worker.py",
+          "breeze_worker.py",
+          "breeze_worker_ctl.py"
         ]
       },
       {

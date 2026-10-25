@@ -1,5 +1,6 @@
 const { app, BrowserWindow, dialog, ipcMain, Menu, shell, protocol, net: electronNet, screen } = require('electron');
 const { autoUpdater } = require('electron-updater');
+const { configureUpdateChannel } = require('./update-policy.cjs');
 const { spawn, spawnSync } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
 const fs = require('node:fs');
@@ -14,6 +15,7 @@ const DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL || 'http://127.0.0.1:5173
 
 let mainWindow = null;
 let backendProcess = null;
+let backgroundService = false;
 let appIsQuitting = false;
 let closeApproved = false;
 let closeCheckInProgress = false;
@@ -164,7 +166,7 @@ function backendLaunch() {
     path.join(root, '.venv', 'Scripts', 'python.exe'),
     path.join(root, 'venv', 'Scripts', 'python.exe'),
   ]) || 'python';
-  return { executable, args: ['-m', 'uvicorn', 'app.main:app', '--host', BACKEND_HOST, '--port', String(BACKEND_PORT)] };
+  return { executable, args: [path.join(root, 'run.py'), '--port', String(BACKEND_PORT)] };
 }
 
 function portIsOpen(port, host) {
@@ -191,7 +193,10 @@ function backendIsReady() {
       response.on('end', () => {
         try {
           const payload = JSON.parse(body);
-          resolve(response.statusCode === 200 && payload.service === 'langbai-TTS-Studio');
+          const expectedRoot = process.env.LANGBAI_CAPTURE_DATA || path.join(app.getPath('documents'), 'langbai-TTS-Studio', 'data');
+          resolve(response.statusCode === 200 && payload.service === 'langbai-TTS-Studio-v2'
+            && payload.protocolVersion === 2 && payload.schemaVersion === 2
+            && path.resolve(payload.dataRoot || '').toLowerCase() === path.resolve(expectedRoot).toLowerCase());
         } catch {
           resolve(false);
         }
@@ -215,7 +220,11 @@ function backendJson(method, requestPath, body = null, timeout = 1800) {
       response.on('end', () => {
         try {
           const parsed = text ? JSON.parse(text) : {};
-          if ((response.statusCode || 500) >= 400) reject(new Error(parsed.detail || `HTTP ${response.statusCode}`));
+          if ((response.statusCode || 500) >= 400) {
+            const error = new Error(parsed.detail || `HTTP ${response.statusCode}`);
+            error.status = response.statusCode;
+            reject(error);
+          }
           else resolve(parsed);
         } catch (error) { reject(error); }
       });
@@ -236,6 +245,23 @@ function activeExitDetail(activity) {
   return lines.join('\n');
 }
 
+async function stopOwnedBackendGracefully() {
+  if (!backendProcess || backgroundService) return true;
+  const owned = backendProcess;
+  try {
+    await backendJson('POST', '/api/service/stop', null, 45000);
+    for (let attempt = 0; attempt < 120; attempt += 1) {
+      if (owned.exitCode !== null) return true;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  } catch (error) {
+    if (owned.exitCode !== null) return true;
+    logDesktop('ERROR', `Graceful task service shutdown failed: ${error.message}`);
+  }
+  await dialog.showMessageBox(mainWindow, { type: 'warning', message: '任务服务尚未确认退出', detail: '窗口仍会保留，请查看引擎诊断。已保存的分段不会删除。' });
+  return false;
+}
+
 async function confirmActiveWorkTermination(parentWindow) {
   let activity;
   try {
@@ -244,24 +270,45 @@ async function confirmActiveWorkTermination(parentWindow) {
     logDesktop('ERROR', `Unable to inspect active work before exit: ${error.message}`);
     return true;
   }
-  if (!activity.active) return true;
+  if (!activity.active) return stopOwnedBackendGracefully();
   const result = await dialog.showMessageBox(parentWindow, {
     type: 'warning',
     title: '仍有本地任务正在运行',
-    message: '退出将终止正在运行的模型与任务',
-    detail: `${activeExitDetail(activity)}\n\n已完成的音频分段和训练检查点会保留。是否仍要退出？`,
-    buttons: ['返回软件', '终止任务并退出'],
+    message: '选择长文任务的退出方式',
+    detail: `${activeExitDetail(activity)}\n\n段后暂停会保存当前片段。后台继续将关闭窗口，任务服务仍运行；其他引擎任务与训练不会被静默终止。`,
+    buttons: ['段后暂停并退出', '后台继续', '返回软件', '立即停止并退出'],
     defaultId: 0,
-    cancelId: 0,
+    cancelId: 2,
     noLink: true,
   });
-  if (result.response !== 1) return false;
+  if (result.response === 2) return false;
+  if (result.response === 1) {
+    await backendJson('POST', '/api/service/prepare-exit', { mode: 'background' });
+    backgroundService = true;
+    backendProcess?.unref();
+    return true;
+  }
+  if (result.response === 0) {
+    if (activity.training?.length || activity.jobs?.some((job) => job.kind !== 'longform')) {
+      await dialog.showMessageBox(parentWindow, { type: 'info', message: '请先停止旧版生成任务和训练，或选择后台继续。' });
+      return false;
+    }
+    await backendJson('POST', '/api/service/prepare-exit', { mode: 'pause' });
+    // Do not kill the backend while its accepted boundary is still being saved.
+    for (let attempt = 0; attempt < 240; attempt += 1) {
+      const current = await backendJson('GET', '/api/runtime/activity');
+      if (!current.jobs?.length) return stopOwnedBackendGracefully();
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    await dialog.showMessageBox(parentWindow, { type: 'info', message: '仍在等待当前片段完成，已保留暂停请求。你可以稍后退出或选择后台继续。' });
+    return false;
+  }
   try {
     await backendJson('POST', '/api/runtime/terminate-active', null, 3500);
   } catch (error) {
     logDesktop('ERROR', `Unable to request graceful task termination: ${error.message}`);
   }
-  return true;
+  return stopOwnedBackendGracefully();
 }
 
 async function startBackend() {
@@ -272,6 +319,9 @@ async function startBackend() {
 
   const root = backendRoot();
   const { executable, args } = backendLaunch();
+  const serviceLogPath = path.join(app.getPath('userData'), 'logs', 'task-service.log');
+  fs.mkdirSync(path.dirname(serviceLogPath), { recursive: true });
+  const serviceLog = fs.openSync(serviceLogPath, 'a');
   backendProcess = spawn(
     executable,
     args,
@@ -283,14 +333,18 @@ async function startBackend() {
         PYTHONUTF8: '1',
         LANGBAI_TTS_PORT: String(BACKEND_PORT),
         LANGBAI_BACKEND_ROOT: root,
+        LANGBAI_STARTED_BY: 'desktop',
+        LANGBAI_APP_VERSION: app.getVersion(),
+        LANGBAI_FRONTEND_ROOT: app.isPackaged ? path.join(process.resourcesPath, 'frontend-dist') : path.join(projectRoot(), 'frontend', 'dist'),
         LANGBAI_PROJECT_ROOT: app.isPackaged ? process.resourcesPath : projectRoot(),
         LANGBAI_TTS_DATA: process.env.LANGBAI_CAPTURE_DATA || path.join(app.getPath('documents'), 'langbai-TTS-Studio', 'data'),
         LANGBAI_INSTALL_ROOT: path.join(app.getPath('documents'), 'langbai-TTS-Studio', 'engines'),
         LANGBAI_OUTPUT_ROOT: path.join(app.isPackaged ? path.dirname(process.execPath) : projectRoot(), 'output'),
       },
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['ignore', serviceLog, serviceLog],
     },
   );
+  fs.closeSync(serviceLog);
 
   backendProcess.stdout?.on('data', (chunk) => {
     const message = String(chunk).trimEnd();
@@ -307,15 +361,15 @@ async function startBackend() {
     logDesktop('ERROR', `Unable to start backend with ${executable}: ${error.message}`);
   });
 
-  for (let attempt = 0; attempt < 50; attempt += 1) {
+  for (let attempt = 0; attempt < 150; attempt += 1) {
     if (await backendIsReady()) return;
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
-  throw new Error(`Backend did not open ${BACKEND_HOST}:${BACKEND_PORT} within 10 seconds`);
+  throw new Error(`任务服务尚未就绪，请查看 ${serviceLogPath}`);
 }
 
 function stopBackend() {
-  if (!backendProcess) return;
+  if (!backendProcess || backgroundService) return;
   const pid = backendProcess.pid;
   if (process.platform === 'win32' && pid) {
     spawnSync('taskkill.exe', ['/pid', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
@@ -477,15 +531,34 @@ async function createWindow() {
     if (/^https?:\/\//i.test(url)) shell.openExternal(url);
     return { action: 'deny' };
   });
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    const target = new URL(url);
+    const localService = target.origin === `http://${BACKEND_HOST}:${BACKEND_PORT}`;
+    const development = !app.isPackaged && target.origin === new URL(DEV_SERVER_URL).origin;
+    if (!localService && !development) event.preventDefault();
+  });
 
-  if (!app.isPackaged) {
+  if (!app.isPackaged && process.env.LANGBAI_USE_BUILT_UI !== '1') {
     await mainWindow.loadURL(DEV_SERVER_URL);
   } else {
-    await mainWindow.loadFile(path.join(projectRoot(), 'frontend', 'dist', 'index.html'), {
-      query: { backendUrl: `http://${BACKEND_HOST}:${BACKEND_PORT}` },
-    });
+    await mainWindow.loadURL(`http://${BACKEND_HOST}:${BACKEND_PORT}/studio/`);
   }
 }
+
+ipcMain.handle('service:request', async (event, requestPath, options = {}) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents) throw new Error('请求来自未知窗口');
+  const source = new URL(event.senderFrame?.url || event.sender.getURL());
+  const allowed = source.origin === `http://${BACKEND_HOST}:${BACKEND_PORT}`
+    || (!app.isPackaged && source.origin === new URL(DEV_SERVER_URL).origin);
+  if (!allowed || typeof requestPath !== 'string' || !/^\/api\/[a-zA-Z0-9_/?=&.%:-]+$/.test(requestPath)) throw new Error('无效的任务服务请求');
+  const method = options.method || 'GET';
+  if (!['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) throw new Error('不支持的请求方法');
+  try {
+    return { status: 200, body: await backendJson(method, requestPath, options.body ?? null, 30000) };
+  } catch (error) {
+    return { status: error.status || 503, body: { detail: error.message } };
+  }
+});
 
 ipcMain.handle('dialog:open-file', async (_event, options = {}) => {
   const result = await dialog.showOpenDialog(mainWindow, {
@@ -543,9 +616,11 @@ ipcMain.handle('dialog:export-audio', async (_event, targetPath) => {
 
 ipcMain.handle('updates:check', async (_event, requestedChannel = 'stable') => {
   if (!app.isPackaged) return { supported: false, reason: '开发模式不检查更新' };
+  if (!fs.existsSync(path.join(process.resourcesPath, 'app-update.yml'))) {
+    return { supported: false, reason: '此本地构建未配置自动更新，可通过新安装包更新' };
+  }
   const wantsBeta = requestedChannel === 'beta';
-  autoUpdater.allowPrerelease = wantsBeta;
-  autoUpdater.channel = wantsBeta ? 'beta' : 'latest';
+  configureUpdateChannel(autoUpdater, requestedChannel);
   const result = await autoUpdater.checkForUpdates();
   return { supported: true, channel: wantsBeta ? 'beta' : 'stable', updateInfo: result?.updateInfo || null };
 });
@@ -586,7 +661,17 @@ app.whenReady().then(async () => {
 app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) createWindow();
 });
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
+  if (!closeApproved && !appIsQuitting && mainWindow && !mainWindow.isDestroyed()) {
+    event.preventDefault();
+    if (closeCheckInProgress) return;
+    closeCheckInProgress = true;
+    void confirmActiveWorkTermination(mainWindow).then((confirmed) => {
+      closeCheckInProgress = false;
+      if (confirmed) { closeApproved = true; app.quit(); }
+    });
+    return;
+  }
   appIsQuitting = true;
   stopBackend();
   desktopLogStream?.end();

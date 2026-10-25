@@ -1,6 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('langbaiDesktop', {
+  requestApi: (path, options) => ipcRenderer.invoke('service:request', path, options),
   getRuntimeInfo: () => ipcRenderer.invoke('app:runtime-info'),
   chooseFile: (options) => ipcRenderer.invoke('dialog:open-file', options),
   readTextFile: () => ipcRenderer.invoke('dialog:read-text-file'),

@@ -1,0 +1,258 @@
+--- a/local_webui.py
++++ b/local_webui.py
+@@ -24,6 +24,7 @@
+ from urllib.parse import urlsplit
+ 
+ from sample_presets import PRESETS, SAMPLE_TEXT, preset_by_name
++from studio_gradio_bridge import attach_studio_tab, browser_preflight_js, guard_free_vram
+ 
+ ROOT = Path(__file__).resolve().parent
+ DEFAULT_MODEL = ROOT / "checkpoints" / "Breeze-TTS-2"
+@@ -155,6 +156,7 @@
+             torch.set_num_threads(self.threads)
+             if not torch.cuda.is_available():
+                 raise RuntimeError("未检测到可用的 NVIDIA CUDA。请检查显卡驱动及 PyTorch CUDA 版本。")
++            guard_free_vram(torch, self.performance_mode)
+             self.device = "cuda:0"
+             self.device_name = torch.cuda.get_device_name(0)
+             started = time.perf_counter()
+@@ -437,123 +439,126 @@
+         font_mono=["Consolas", "monospace"],
+     )
+     with gr.Blocks(title=page_title, theme=theme, css=css, analytics_enabled=False) as demo:
+-        gr.Markdown(f"# {page_title}\n" + ("使用参考声音生成中文配音；当前加速配置固定 CFG=1，声音描述留空。" if accelerated else "输入中文，使用参考声音或编辑声音描述，生成后直接试听。"))
+-        model_status = gr.Markdown("模型尚未加载。点击生成时会在本机加载，首次需要稍等。")
+-        with gr.Row():
+-            with gr.Column(scale=3, min_width=300):
+-                text = gr.Textbox(value=SAMPLE_TEXT, label="朗读文本", lines=5, max_lines=12,
+-                                  placeholder="输入要朗读的中文内容", info="先用短段落试听。中文可用 [笑]、[叹气] 等事件标记。")
+-                preset = gr.Dropdown([item["name"] for item in PRESETS], value=None, label="声音与情绪预设", interactive=not accelerated)
+-                instruction = gr.Textbox(value="", label="声音描述（可以编辑）", lines=3, interactive=not accelerated,
+-                                         info="加速版固定留空；如需声音描述，请重启普通版。" if accelerated else "描述音色、情绪和语速；保持与朗读文本相同的语言。")
+-                with gr.Row():
+-                    seed = gr.Number(value=42, label="随机种子", precision=0, minimum=0, maximum=2147483647)
+-                    cfg = gr.Slider(0.1, 10, value=1, step=0.1, label="描述引导强度 CFG", interactive=not accelerated, info="加速版固定为1。" if accelerated else "参考声音克隆先用1；声音描述可从4开始。")
+-                with gr.Accordion("高级参数", open=False):
+-                    max_tokens = gr.Slider(50, 1500, value=600, step=50, label="生成长度上限（音频帧）", info="每秒约12.5帧；600帧约48秒，达到上限可能截断。")
+-                    temperature = gr.Slider(0.1, 2, value=0.9, step=0.05, label="采样温度")
+-                    top_k = gr.Slider(0, 100, value=50, step=1, label="Top-k（0关闭）")
+-                    top_p = gr.Slider(0.1, 1, value=1, step=0.05, label="Top-p")
+-                    repetition = gr.Slider(0.5, 2, value=1.1, step=0.05, label="重复惩罚")
+-                with gr.Accordion("可选：参考声音", open=bool(character_voices)):
+-                    if character_voices:
+-                        character_selector = gr.Dropdown(
+-                            [(voice["name"], voice["id"]) for voice in character_voices],
+-                            value="march7" if default_voice else None, label="角色参考声音",
+-                            info="选择后填入原音与准确文字稿，并清空声音描述、将CFG设为1，以测试纯声音克隆。",
+-                        )
+-                    reference = gr.Audio(value=default_voice["ref_audio_path"] if default_voice else None, sources=["upload"], type="filepath", label="参考音频", format="wav")
+-                    reference_text = gr.Textbox(value=default_voice["ref_text"] if default_voice else "", label="参考音频的准确文字稿", lines=2,
+-                                                info="与参考音频同时提供。保留声音描述会使用声音指导模式；清空描述可测试纯声音克隆。")
+-                    if reference_warning:
+-                        gr.Markdown(f"角色参考声音暂不可用：{reference_warning}")
+-                generate = gr.Button("生成试听音频", variant="primary", elem_id="generate-button")
+-            with gr.Column(scale=2, min_width=300):
+-                output = gr.Audio(label="生成结果", type="filepath", interactive=False, show_download_button=True)
+-                download = gr.File(label="下载 WAV", interactive=False)
+-                metrics = gr.Markdown("生成完成后显示本机用时、音频时长和显存。")
+-                with gr.Accordion("保存的样音", open=True):
+-                    sample_files = sorted((OUTPUT_DIR / "samples").glob("*.wav"))
+-                    if sample_files:
+-                        for path in sample_files:
+-                            gr.Audio(str(path), label=path.stem, interactive=False, show_download_button=True)
+-                    else:
+-                        gr.Markdown("四种预设可用上方同一段文字逐一比较。批量样音会保存到 outputs/samples。")
+-        if character_voices:
+-            with gr.Accordion("角色克隆对比：参考原音 / 新文本生成", open=True):
+-                clone_manifest = OUTPUT_DIR / "character_clones" / "manifest.json"
+-                clone_by_id = {}
+-                if clone_manifest.is_file():
+-                    try:
+-                        clone_payload = json.loads(clone_manifest.read_text(encoding="utf-8-sig"))
+-                        clone_by_id = {item["id"]: item for item in clone_payload.get("samples", []) if isinstance(item, dict) and isinstance(item.get("id"), str)}
+-                    except (OSError, ValueError, TypeError):
+-                        pass
+-                for voice in character_voices:
+-                    gr.Markdown(f"### {voice['name']}")
++        with gr.Tab("短句试听", id="breeze-short"):
++            gr.Markdown(f"# {page_title}\n" + ("使用参考声音生成中文配音；当前加速配置固定 CFG=1，声音描述留空。" if accelerated else "输入中文，使用参考声音或编辑声音描述，生成后直接试听。"))
++            model_status = gr.Markdown("模型尚未加载。点击生成时会在本机加载，首次需要稍等。")
++            gr.HTML('<div id="langbai-gpu-guard" role="alert" style="display:none;padding:12px;border:1px solid #fbbf24;background:#fffbeb;color:#92400e;border-radius:8px"></div>')
++            with gr.Row():
++                with gr.Column(scale=3, min_width=300):
++                    text = gr.Textbox(value=SAMPLE_TEXT, label="朗读文本", lines=5, max_lines=12,
++                                      placeholder="输入要朗读的中文内容", info="先用短段落试听。中文可用 [笑]、[叹气] 等事件标记。")
++                    preset = gr.Dropdown([item["name"] for item in PRESETS], value=None, label="声音与情绪预设", interactive=not accelerated)
++                    instruction = gr.Textbox(value="", label="声音描述（可以编辑）", lines=3, interactive=not accelerated,
++                                             info="加速版固定留空；如需声音描述，请重启普通版。" if accelerated else "描述音色、情绪和语速；保持与朗读文本相同的语言。")
+                     with gr.Row():
+-                        gr.Audio(voice["ref_audio_path"], label=f"{voice['name']} · 参考原音", interactive=False, show_download_button=True)
+-                        clone_path = OUTPUT_DIR / "character_clones" / f"{voice['id']}.wav"
+-                        if clone_path.is_file() and clone_path.resolve().is_relative_to(OUTPUT_DIR.resolve()):
+-                            gr.Audio(str(clone_path), label=f"{voice['name']} · 克隆新文本", interactive=False, show_download_button=True)
++                        seed = gr.Number(value=42, label="随机种子", precision=0, minimum=0, maximum=2147483647)
++                        cfg = gr.Slider(0.1, 10, value=1, step=0.1, label="描述引导强度 CFG", interactive=not accelerated, info="加速版固定为1。" if accelerated else "参考声音克隆先用1；声音描述可从4开始。")
++                    with gr.Accordion("高级参数", open=False):
++                        max_tokens = gr.Slider(50, 1500, value=600, step=50, label="生成长度上限（音频帧）", info="每秒约12.5帧；600帧约48秒，达到上限可能截断。")
++                        temperature = gr.Slider(0.1, 2, value=0.9, step=0.05, label="采样温度")
++                        top_k = gr.Slider(0, 100, value=50, step=1, label="Top-k（0关闭）")
++                        top_p = gr.Slider(0.1, 1, value=1, step=0.05, label="Top-p")
++                        repetition = gr.Slider(0.5, 2, value=1.1, step=0.05, label="重复惩罚")
++                    with gr.Accordion("可选：参考声音", open=bool(character_voices)):
++                        if character_voices:
++                            character_selector = gr.Dropdown(
++                                [(voice["name"], voice["id"]) for voice in character_voices],
++                                value="march7" if default_voice else None, label="角色参考声音",
++                                info="选择后填入原音与准确文字稿，并清空声音描述、将CFG设为1，以测试纯声音克隆。",
++                            )
++                        reference = gr.Audio(value=default_voice["ref_audio_path"] if default_voice else None, sources=["upload"], type="filepath", label="参考音频", format="wav")
++                        reference_text = gr.Textbox(value=default_voice["ref_text"] if default_voice else "", label="参考音频的准确文字稿", lines=2,
++                                                    info="与参考音频同时提供。保留声音描述会使用声音指导模式；清空描述可测试纯声音克隆。")
++                        if reference_warning:
++                            gr.Markdown(f"角色参考声音暂不可用：{reference_warning}")
++                    generate = gr.Button("生成试听音频", variant="primary", elem_id="generate-button")
++                with gr.Column(scale=2, min_width=300):
++                    output = gr.Audio(label="生成结果", type="filepath", interactive=False, show_download_button=True)
++                    download = gr.File(label="下载 WAV", interactive=False)
++                    metrics = gr.Markdown("生成完成后显示本机用时、音频时长和显存。")
++                    with gr.Accordion("保存的样音", open=True):
++                        sample_files = sorted((OUTPUT_DIR / "samples").glob("*.wav"))
++                        if sample_files:
++                            for path in sample_files:
++                                gr.Audio(str(path), label=path.stem, interactive=False, show_download_button=True)
+                         else:
+-                            gr.Markdown("该角色的新文本样音尚未生成。")
+-                    gr.Markdown(f"参考文字：{voice['ref_text']}")
+-                    clone_result = clone_by_id.get(voice["id"])
+-                    if clone_result and isinstance(clone_result.get("text"), str):
+-                        gr.Markdown(f"生成文字：{clone_result['text']}")
+-                    gr.Markdown(f"[查看配音来源]({voice['source_url']})")
+-        gr.Markdown(f"在本机运行 · {'加速版（参考克隆 / CFG=1）' if accelerated else '普通版（eager）'} · 单任务队列\n\n" + ("需要其他 CFG、声音描述或无参考生成时，请重启普通版。\n\n" if accelerated else "") + "模型及本地输出遵循 BreezeBlue 的研究与非商业许可。")
+-        load_button = gr.Button("加载本地模型", visible=False)
+-        load_info = gr.JSON(visible=False)
+-
+-        def load_model():
+-            # Loading is separate from the first generation's lazy graph capture.
+-            return engine.ensure_loaded()
+-
+-        load_button.click(
+-            load_model, inputs=[], outputs=load_info, api_name="load_model",
+-            concurrency_limit=1, concurrency_id="breeze-gpu",
+-        )
+-        preset.change(lambda name: preset_by_name(name)["instruction"], preset, instruction, queue=False)
+-        if character_voices:
+-            def select_character(voice_id):
+-                voice = character_by_id.get(voice_id)
+-                if voice is None:
+-                    return gr.skip(), gr.skip(), gr.skip(), gr.skip()
+-                return voice["ref_audio_path"], voice["ref_text"], "", 1.0
+-
+-            character_selector.change(
+-                select_character, character_selector,
+-                [reference, reference_text, instruction, cfg], queue=False,
++                            gr.Markdown("四种预设可用上方同一段文字逐一比较。批量样音会保存到 outputs/samples。")
++            if character_voices:
++                with gr.Accordion("角色克隆对比：参考原音 / 新文本生成", open=True):
++                    clone_manifest = OUTPUT_DIR / "character_clones" / "manifest.json"
++                    clone_by_id = {}
++                    if clone_manifest.is_file():
++                        try:
++                            clone_payload = json.loads(clone_manifest.read_text(encoding="utf-8-sig"))
++                            clone_by_id = {item["id"]: item for item in clone_payload.get("samples", []) if isinstance(item, dict) and isinstance(item.get("id"), str)}
++                        except (OSError, ValueError, TypeError):
++                            pass
++                    for voice in character_voices:
++                        gr.Markdown(f"### {voice['name']}")
++                        with gr.Row():
++                            gr.Audio(voice["ref_audio_path"], label=f"{voice['name']} · 参考原音", interactive=False, show_download_button=True)
++                            clone_path = OUTPUT_DIR / "character_clones" / f"{voice['id']}.wav"
++                            if clone_path.is_file() and clone_path.resolve().is_relative_to(OUTPUT_DIR.resolve()):
++                                gr.Audio(str(clone_path), label=f"{voice['name']} · 克隆新文本", interactive=False, show_download_button=True)
++                            else:
++                                gr.Markdown("该角色的新文本样音尚未生成。")
++                        gr.Markdown(f"参考文字：{voice['ref_text']}")
++                        clone_result = clone_by_id.get(voice["id"])
++                        if clone_result and isinstance(clone_result.get("text"), str):
++                            gr.Markdown(f"生成文字：{clone_result['text']}")
++                        gr.Markdown(f"[查看配音来源]({voice['source_url']})")
++            gr.Markdown(f"在本机运行 · {'加速版（参考克隆 / CFG=1）' if accelerated else '普通版（eager）'} · 单任务队列\n\n" + ("需要其他 CFG、声音描述或无参考生成时，请重启普通版。\n\n" if accelerated else "") + "模型及本地输出遵循 BreezeBlue 的研究与非商业许可。")
++            load_button = gr.Button("加载本地模型", visible=False)
++            load_info = gr.JSON(visible=False)
++
++            def load_model():
++                # Loading is separate from the first generation's lazy graph capture.
++                return engine.ensure_loaded()
++
++            load_button.click(
++                load_model, inputs=[], outputs=load_info, api_name="load_model",
++                concurrency_limit=1, concurrency_id="breeze-gpu", js=browser_preflight_js(),
+             )
+-
+-        def generate_audio(text_value, instruction_value, seed_value, cfg_value, limit_value,
+-                           temperature_value, k_value, p_value, repetition_value, ref_value, ref_text_value,
+-                           progress=gr.Progress()):
+-            yield gr.skip(), gr.skip(), "正在处理……", "正在检查模型；首次加载可能需要几分钟。"
+-            try:
+-                result = engine.synthesize(
+-                    text_value, instruction_value, seed=int(seed_value), cfg_scale=cfg_value,
+-                    max_new_tokens=int(limit_value), temperature=temperature_value,
+-                    top_k=int(k_value), top_p=p_value, repetition_penalty=repetition_value,
+-                    ref_audio=ref_value, ref_text=ref_text_value,
+-                    status=lambda message: progress(0, desc=message),
++            preset.change(lambda name: preset_by_name(name)["instruction"], preset, instruction, queue=False)
++            if character_voices:
++                def select_character(voice_id):
++                    voice = character_by_id.get(voice_id)
++                    if voice is None:
++                        return gr.skip(), gr.skip(), gr.skip(), gr.skip()
++                    return voice["ref_audio_path"], voice["ref_text"], "", 1.0
++
++                character_selector.change(
++                    select_character, character_selector,
++                    [reference, reference_text, instruction, cfg], queue=False,
+                 )
+-                ready = f"{page_title} · 模型已就绪：{engine.device_name} · 首次加载 {engine.load_seconds:.1f} 秒 · CPU线程 {engine.threads}"
+-                yield result["path"], result["path"], format_metrics(result), ready
+-            except Exception as exc:
+-                import traceback
+-                traceback.print_exc()
+-                yield gr.skip(), gr.skip(), f"生成失败：{exc}", ("模型已加载，可调整输入后重试。" if engine.loaded else f"模型尚未就绪：{exc}")
+-                gr.Warning(str(exc))
+-
+-        generate.click(
+-            generate_audio,
+-            [text, instruction, seed, cfg, max_tokens, temperature, top_k, top_p, repetition, reference, reference_text],
+-            [output, download, metrics, model_status],
+-            concurrency_limit=1, concurrency_id="breeze-gpu",
+-        )
++
++            def generate_audio(text_value, instruction_value, seed_value, cfg_value, limit_value,
++                               temperature_value, k_value, p_value, repetition_value, ref_value, ref_text_value,
++                               progress=gr.Progress()):
++                yield gr.skip(), gr.skip(), "正在处理……", "正在检查模型；首次加载可能需要几分钟。"
++                try:
++                    result = engine.synthesize(
++                        text_value, instruction_value, seed=int(seed_value), cfg_scale=cfg_value,
++                        max_new_tokens=int(limit_value), temperature=temperature_value,
++                        top_k=int(k_value), top_p=p_value, repetition_penalty=repetition_value,
++                        ref_audio=ref_value, ref_text=ref_text_value,
++                        status=lambda message: progress(0, desc=message),
++                    )
++                    ready = f"{page_title} · 模型已就绪：{engine.device_name} · 首次加载 {engine.load_seconds:.1f} 秒 · CPU线程 {engine.threads}"
++                    yield result["path"], result["path"], format_metrics(result), ready
++                except Exception as exc:
++                    import traceback
++                    traceback.print_exc()
++                    yield gr.skip(), gr.skip(), f"生成失败：{exc}", ("模型已加载，可调整输入后重试。" if engine.loaded else f"模型尚未就绪：{exc}")
++                    gr.Warning(str(exc))
++
++            generate.click(
++                generate_audio,
++                [text, instruction, seed, cfg, max_tokens, temperature, top_k, top_p, repetition, reference, reference_text],
++                [output, download, metrics, model_status],
++                concurrency_limit=1, concurrency_id="breeze-gpu", js=browser_preflight_js(),
++            )
++        attach_studio_tab(gr, engine, model_status)
+     demo.queue(default_concurrency_limit=1, max_size=8)
+     return demo
+ 
