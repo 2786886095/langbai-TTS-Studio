@@ -1365,3 +1365,59 @@ h1 { margin: 0; font-size: 20px; line-height: 1.2; letter-spacing: -.25px; }
   .multi-role-row { grid-template-columns: 1fr; }
   .multi-speaker-toolbar button { flex: 1; justify-content: center; }
 }
+
+/* Document-centred Studio v2 shell. Engine-specific legacy workspaces remain available. */
+.app-shell { grid-template-columns: 200px minmax(0, 1fr); min-height: 0; height: 100dvh; }
+.app-shell > .sidebar { min-height: 0; height: 100%; }
+.sidebar nav button { white-space: nowrap; }
+.app-shell .lf-panel-heading input.lf-title { flex: 1; width: 0; min-width: 40px; margin: 0; padding: 4px 8px; border: 0; min-height: 32px; font-size: 13px; }
+.app-shell .lf-panel-heading { gap: 8px; }
+.app-shell .task-origin { display: block; font-size: 10px; color: #64748b; font-weight: 400; margin-top: 4px; }
+.app-shell .data-row .engine-pill { display: block; }
+.density-compact .longform-workspace :is(button, input:not([type=checkbox]), select) { min-height: 32px; }
+.density-compact .lf-output-scroll { padding: 11px; }
+.density-compact .lf-output-fields { gap: 9px; }
+@media (max-width: 1280px) {
+  .app-shell { grid-template-columns: 64px minmax(0, 1fr); }
+  .app-shell > .sidebar { position: static; display: flex; width: auto; transform: none; z-index: 10; }
+  .sidebar-head { justify-content: center; padding: 0; height: 64px; }
+  .sidebar .app-logo div, .sidebar nav span, .sidebar .engine-health, .sidebar .sidebar-settings span, .sidebar .density-toggle span, .sidebar nav b { display: none; }
+  .sidebar nav { padding: 12px 8px; gap: 8px; }
+  .sidebar nav button { justify-content: center; padding: 10px; }
+  .sidebar .sidebar-settings { width: 48px; margin-inline: 8px; justify-content: center; padding-inline: 10px; }
+  .sidebar .density-toggle { width: 48px; margin-inline: 8px; justify-content: center; padding: 8px; }
+  .sidebar .sidebar-close { display: none !important; }
+  .app-shell .lf-topbar { flex: 0 0 52px; padding: 6px 12px; }
+  .app-shell .lf-topbar .eyebrow { display: none; }
+  .app-shell .lf-topbar h1 { font-size: 16px; }
+  .app-shell .lf-topbar :is(button, .primary-button, .secondary-button) { min-height: 36px; padding-block: 7px; }
+  .app-shell .lf-context { min-height: 44px; padding-block: 6px; }
+  .app-shell .lf-context :is(select, button) { min-height: 32px; height: 32px; }
+  .app-shell .lf-mobile-tabs { flex: 0 0 32px; padding-top: 0; }
+  .app-shell .lf-mobile-tabs button { min-height: 32px; }
+  .app-shell .lf-main-grid { padding: 8px; }
+  .app-shell .lf-panel-heading { flex-basis: 36px; }
+  .app-shell .lf-panel-heading button { min-height: 32px; padding: 5px; }
+  .app-shell .lf-document footer { flex-basis: 24px; }
+  .app-shell .lf-task-strip { flex-basis: 32px; }
+  .app-shell .lf-task-strip button { min-height: 30px; }
+}
+@media (max-width: 760px) {
+  .app-shell .lf-topbar h1 { display: none; }
+  .app-shell .lf-topbar > div:first-child::after { content: "创作"; font-weight: 700; }
+  .app-shell .lf-top-actions .lf-text-button { font-size: 0; padding: 6px; }
+  .app-shell .lf-top-actions .lf-text-button svg { width: 17px; height: 17px; }
+  .app-shell .lf-panel-heading > div:last-child button { font-size: 0; gap: 0; }
+  .app-shell .hub-tabs { overflow-x: auto; }
+  .app-shell .hub-tabs button { white-space: nowrap; }
+}
+@media (max-width: 620px) {
+  .app-shell .lf-topbar { flex-basis: auto; padding: 9px 10px; }
+  .app-shell .lf-panel-heading { flex-basis: auto; }
+  .app-shell .lf-task-strip { flex-basis: auto; }
+}
+.legacy-output-capability { display: flex; gap: 8px; padding: 12px 16px; background: #eff6ff; border-bottom: 1px solid #dbeafe; flex: 0 0 auto; color: #1e40af; }
+.legacy-output-capability > svg { flex-shrink: 0; margin-top: 2px; }
+.legacy-output-capability strong { font-size: 12px; }
+.legacy-output-capability p { margin: 5px 0 0; color: #475569; font-size: 12px; line-height: 1.6; }
+.legacy-output-capability .lf-text-button { padding-left: 0; }

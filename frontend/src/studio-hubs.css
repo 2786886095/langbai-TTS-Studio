@@ -1,0 +1,61 @@
+.studio-hub { height: 100%; min-height: 0; display: flex; flex-direction: column; }
+.hub-header { flex: 0 0 auto; padding: 20px 24px 15px; border-bottom: 1px solid var(--border); background: #fff; }
+.hub-header h1 { font-size: 22px; }
+.hub-header > div > p:last-child { color: #64748b; font-size: 12px; margin: 8px 0 0; }
+.hub-tabs { display: flex; align-items: center; gap: 5px; padding: 8px 22px 0; border-bottom: 1px solid var(--border); background: #fff; flex-shrink: 0; }
+.hub-tabs button { padding: 10px 14px; color: #64748b; border: 0; border-bottom: 2px solid transparent; background: transparent; font-size: 13px; }
+.hub-tabs button[aria-current=page] { color: #1d4ed8; border-color: #2563eb; font-weight: 650; }
+.hub-content { flex: 1; min-height: 0; overflow: hidden; }
+.hub-content > .library-page, .hub-content > .manager-page { height: 100%; }
+.hub-content .library-topbar .back-link, .hub-content .manager-topbar .back-link { display: none; }
+.hub-content .library-topbar .eyebrow, .hub-content .manager-topbar .eyebrow { display: none; }
+.hub-content .library-topbar h1, .hub-content .manager-topbar h1 { font-size: 17px; }
+.hub-content .library-topbar, .hub-content .manager-topbar { padding-block: 14px; min-height: 82px; }
+.breeze-voices, .breeze-engine-panel { height: 100%; overflow-y: auto; padding: 22px 24px; }
+.hub-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-bottom: 18px; }
+.hub-section-heading h2, .hub-section-heading h3 { margin: 0; font-size: 17px; }
+.hub-section-heading h3 { font-size: 15px; }
+.hub-section-heading p { margin: 7px 0 0; color: #64748b; font-size: 12px; line-height: 1.7; }
+.breeze-voice-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
+.breeze-voice-card { background: #fff; padding: 18px; border: 1px solid var(--border); border-radius: 10px; }
+.breeze-voice-card > div:first-child { display: flex; gap: 10px; align-items: center; }
+.breeze-voice-card strong { flex: 1; font-size: 14px; }
+.hub-engine-symbol { width: 42px; height: 42px; background: #e0f2fe; border: 1px solid #bae6fd; color: #0284c7; display: grid; place-items: center; border-radius: 9px; flex-shrink: 0; }
+.breeze-voice-card > p { font-size: 13px; color: #475569; line-height: 1.8; min-height: 46px; }
+.breeze-voice-card dl, .hub-status-list { display: grid; grid-template-columns: 65px minmax(0, 1fr); gap: 8px; font-size: 12px; color: #64748b; }
+.breeze-voice-card dd, .hub-status-list dd { color: #334155; margin: 0; overflow-wrap: anywhere; }
+.breeze-card-actions { display: flex; gap: 8px; border-top: 1px solid var(--border); padding-top: 14px; margin-top: 16px; }
+.breeze-card-actions > .icon-button { margin-left: auto; align-self: center; }
+.hub-voice-dialog { background: #fff; width: min(600px, 95vw); max-height: 92vh; overflow-y: auto; border-radius: 12px; padding: 22px; box-shadow: 0 16px 60px #0f172a44; }
+.hub-voice-dialog header { display: flex; justify-content: space-between; align-items: center; gap: 14px; margin-bottom: 20px; }
+.hub-voice-dialog h2 { margin: 0; font-size: 18px; }
+.hub-form { display: grid; gap: 15px; }
+.hub-form label:not(.lf-check) { display: grid; gap: 7px; color: #475569; font-size: 12px; }
+.hub-form input:not([type=checkbox]), .hub-form textarea { min-width: 0; width: 100%; border: 1px solid #cbd5e1; border-radius: 6px; padding: 9px 10px; font-size: 13px; color: #0f172a; }
+.hub-form textarea { resize: vertical; min-height: 80px; line-height: 1.7; }
+.hub-form .lf-check { display: flex; align-items: flex-start; gap: 7px; color: #475569; font-size: 12px; line-height: 1.7; }
+.hub-form .lf-check input { margin-top: 3px; }
+.hub-voice-dialog footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; }
+.hub-engine-overview { display: flex; align-items: center; gap: 14px; background: #fff; border: 1px solid var(--border); padding: 18px; border-radius: 10px; margin-bottom: 18px; }
+.hub-engine-overview > div { flex: 1; }
+.hub-engine-overview h2 { font-size: 19px; margin: 0; }
+.hub-engine-overview p { color: #64748b; margin: 6px 0 0; font-size: 12px; }
+.hub-engine-layout { display: grid; grid-template-columns: minmax(340px, 1.2fr) minmax(280px, 1fr); align-items: start; gap: 18px; }
+.hub-card { background: #fff; border: 1px solid var(--border); padding: 20px; border-radius: 10px; margin-bottom: 18px; }
+.hub-card a { text-decoration: none; margin-top: 12px; }
+.hub-license-card { color: #475569; }
+.hub-license-card > svg { color: #0284c7; }
+.hub-license-card h3 { font-size: 14px; margin: 10px 0 0; }
+.hub-license-card p { font-size: 12px; line-height: 1.8; }
+.manager-page.mode-engines .preferences-panel { display: none; }
+.manager-page.mode-preferences .manager-engines, .manager-page.mode-preferences .install-overview, .manager-page.mode-preferences .models-panel, .manager-page.mode-preferences .transfers-panel { display: none; }
+.manager-page.mode-preferences .manager-body { grid-template-columns: minmax(0, 1fr); }
+.manager-page.mode-preferences .manager-content { max-width: 1150px; width: 100%; margin: auto; }
+.p1-task-filters { display: flex; align-items: center; gap: 7px; padding: 12px 18px; border-bottom: 1px solid var(--border); background: #fff; flex-wrap: wrap; }
+.p1-task-filters button { border: 1px solid var(--border); border-radius: 6px; background: #fff; color: #64748b; font-size: 12px; padding: 7px 11px; }
+.p1-task-filters button[aria-pressed=true] { color: #1d4ed8; border-color: #93c5fd; background: #eff6ff; }
+.runtime-auto-load { font-size: 12px; color: #64748b; align-self: center; padding: 8px; }
+.hub-consent-note, .hub-runtime-description { color: #64748b; font-size: 12px; line-height: 1.7; }
+.hub-runtime-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.hub-card hr { border: 0; border-top: 1px solid var(--border); margin: 18px 0; }
+@media (max-width: 1100px) { .hub-engine-layout { grid-template-columns: 1fr; } .hub-header { padding: 16px; } .hub-tabs { padding-inline: 12px; } .breeze-voices, .breeze-engine-panel { padding: 16px; } }

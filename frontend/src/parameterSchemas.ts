@@ -30,15 +30,12 @@ export const engines: Record<EngineId, { name: string; description: string; acce
   gpt_sovits: { name: "GPT-SoVITS", description: "双权重模型 · 参考音频", accent: "#059669" },
 };
 
-const longAudio: Group = { title: "长音频与输出", summary: "无软件时长上限、断点续作、重试与流式合并", fields: [
-  { key: "split_mode", label: "智能分段方式", type: "select", default: "按标点与长度", options: ["按标点与长度", "仅按标点", "按段落", "不分段"], help: "决定长文本如何拆成稳定的小段，通常推荐按标点与长度。" },
+const longAudio: Group = { title: "长音频与输出", summary: "当前入口固定 WAV；断点恢复与多格式导出请用单人长文工作台", fields: [
   { key: "segment_chars", label: "每段最大字数", type: "number", default: 180, min: 40, max: 1000, step: 10, unit: "字", help: "越小越稳定；越大更连贯，但显存与失败风险更高。" },
   { key: "segment_pause", label: "段间停顿", type: "number", default: 280, min: 0, max: 3000, step: 20, unit: "ms", help: "合并时插入的静音，旁白通常使用 200–400ms。" },
   { key: "retry_count", label: "失败自动重试", type: "number", default: 2, min: 0, max: 10, step: 1, unit: "次", help: "只重试失败分段，已经完成的段不会重做。" },
-  { key: "resume", label: "断点续作", type: "toggle", default: true, help: "应用重启后从最后完成的分段继续。" },
-  { key: "keep_segments", label: "保留分段音频", type: "toggle", default: true, help: "保留每段 WAV，便于局部重做和后期剪辑。" },
-  { key: "output_format", label: "最终输出格式", type: "select", default: "WAV", options: ["WAV", "FLAC", "MP3", "OGG"], help: "WAV 无损且兼容性最好；MP3 更省空间。" },
-  { key: "sample_rate", label: "统一采样率", type: "select", default: "保持引擎原始", options: ["保持引擎原始", "24000 Hz", "32000 Hz", "44100 Hz", "48000 Hz"], help: "合并前统一采样率，视频后期通常选 48kHz。" },
+  { key: "keep_segments", label: "保留分段音频", type: "toggle", default: true, help: "保留每段 WAV，便于后期剪辑和本次任务的失败段重试。" },
+  { key: "sample_rate", label: "合并采样率（固定值）", type: "select", default: "44100 Hz", options: ["24000 Hz", "32000 Hz", "44100 Hz", "48000 Hz"], help: "当前原生/多人入口必须指定合并采样率；保持引擎原生采样率请使用单人长文工作台。" },
 ] };
 
 const emotions = ["喜", "怒", "哀", "惧", "厌恶", "低落", "惊喜", "平静"].map((label, i): Field => ({ key: `emo_${i}`, label: `${label}向量`, type: "range", default: label === "平静" ? 0.4 : 0, min: 0, max: 1, step: 0.05, help: "八维情感之一；总强度会被模型限制在安全范围内。" }));
