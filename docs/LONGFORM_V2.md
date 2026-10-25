@@ -1,6 +1,6 @@
 # 1.3.0 长文工作台与 Breeze 接入
 
-本文描述 1.3.0 开发分支已经接通的 P0 长文核心与 P1 工作台。它不是正式发布公告，也不代表全部真实引擎和打包场景已经验收。
+本文描述 v1.3.0 的 P0 长文核心与 P1 工作台。各项验收范围和限制单独列出，不代表全部真实引擎和打包场景均已验收。[GitHub Release](https://github.com/2786886095/langbai-TTS-Studio/releases/tag/v1.3.0)
 
 ## 两个入口，共用任务
 
@@ -160,7 +160,7 @@ cd ..
 
 最终包实测冷启动总墙钟 **106.887 秒**，其中准备 37.781 秒、加载 52.000 秒、预热 11.609 秒、生成 5.360 秒，得到 7.84 秒 WAV。短句的冷启动总等待不能直接当成热模型逐段生成速度；阶段时间也不强行补齐成完全相等的总和。公开摘要见 [PACKAGED_BREEZE_20261025.json](verification/PACKAGED_BREEZE_20261025.json)。
 
-本地开发安装包：`dist-longform-final/langbai-TTS-Studio-Setup-1.3.0-x64.exe`，123844219 字节，Authenticode 状态 **NotSigned**，尚未发布到 GitHub。文件 SHA-256：
+v1.3.0 采用本次已实测的安装包：`dist-longform-final/langbai-TTS-Studio-Setup-1.3.0-x64.exe`，123844219 字节，Authenticode 状态 **NotSigned**。发布标签为 `v1.3.0`；下述 hash 对应这个既有构建，不因发布文档和 CI 检查更新而重新生成安装包。文件 SHA-256：
 
 ```text
 c75a377c32171f9d9a39f024ff11d80132932a5f5c60d00ad617b2e9456c1e51

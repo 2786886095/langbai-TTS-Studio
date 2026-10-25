@@ -4,9 +4,9 @@
 
 面向 Windows 的本地配音工作台，管理 IndexTTS2、VoxCPM2、GPT-SoVITS，并接入已安装在 WSL 中的 Breeze TTS 2。桌面和本机网页共用长文任务，可粘贴文稿、自动分段、查看进度、暂停和恢复，最后合并成完整配音。
 
-> 当前为 **1.3.0 开发分支，尚未正式发布**。应用代码使用 MIT；上游源码、模型权重和素材各有独立条款。Breeze 权重限制研究和非商业用途，适配代码的公开分发边界仍待上游澄清，不能据此推定可商用。
+> 当前版本为 **v1.3.0**。[下载安装包](https://github.com/2786886095/langbai-TTS-Studio/releases/tag/v1.3.0)。应用代码使用 MIT；上游源码、模型权重和素材各有独立条款。Breeze 权重限制研究和非商业用途，适配代码的公开分发边界仍待上游澄清，不能据此推定可商用。
 
-完整使用方法、数据回滚和阶段性验收记录见 [长文工作台说明](docs/LONGFORM_V2.md)。
+完整使用方法、数据回滚和验收记录见 [长文工作台说明](docs/LONGFORM_V2.md)。
 
 ## 已实现功能
 
@@ -85,7 +85,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\setup.ps1
 
 ## 验收与打包
 
-2026-10-25 本地冻结源码的后端 151 项测试通过，非 live acceptance 44 项通过、27 项跳过。真实 Breeze 万字生成与恢复验收完成：点击至成品发布 31 分 09.383 秒（含主动暂停和两次冷启动），产出 40 分 33.09 秒音频。最终本地未签名 NSIS 开发包另完成真实短句测试；详细口径、限制和文件 hash 见 [验收记录](docs/LONGFORM_V2.md#本轮验收记录)。未发布到 GitHub。
+2026-10-25 本地冻结源码的后端 151 项测试通过，非 live acceptance 44 项通过、27 项跳过；发布准备时修正迁移后的静态验收检查，CI 等价严格验收为 59 项通过、12 项跳过，跳过不计为通过。真实 Breeze 万字生成与恢复验收完成：点击至成品发布 31 分 09.383 秒（含主动暂停和两次冷启动），产出 40 分 33.09 秒音频。正式版使用已实测的未签名 NSIS 安装包，该包另完成真实 Breeze 短句测试；详细口径、限制和文件 hash 见 [验收记录](docs/LONGFORM_V2.md#本轮验收记录)。
 
 ```powershell
 backend\.venv\Scripts\python.exe -m pytest backend\tests -q

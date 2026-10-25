@@ -50,8 +50,9 @@
     "bytes": 123844219,
     "sha256": "c75a377c32171f9d9a39f024ff11d80132932a5f5c60d00ad617b2e9456c1e51",
     "authenticodeStatus": "NotSigned",
-    "kind": "Local development package",
-    "publishedToGitHub": false
+    "kind": "Verified build used for v1.3.0 release",
+    "publishedToGitHubAtVerification": false,
+    "releaseTag": "v1.3.0"
   },
   "limitations": [
     "This is a real short-clip smoke test of the final package, not another full 10000-Han generation run.",
