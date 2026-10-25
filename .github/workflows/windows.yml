@@ -37,6 +37,8 @@ jobs:
       - name: Install project dependencies
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           uv venv --python 3.12 backend/.venv
           uv pip install --python backend/.venv/Scripts/python.exe -r backend/requirements-dev.txt
           npm ci
@@ -45,6 +47,8 @@ jobs:
       - name: Verify backend and product contracts
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           Push-Location backend
           .venv/Scripts/python.exe -m pytest tests -q
           Pop-Location
@@ -53,6 +57,8 @@ jobs:
       - name: Verify frontend
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           npm test
           npm --prefix frontend run build
           Push-Location frontend

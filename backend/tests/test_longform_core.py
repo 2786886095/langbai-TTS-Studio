@@ -34,13 +34,15 @@ def request(text="第一段内容。第二段内容。第三段内容。", **kwa
             "licenseAccepted": True, "segmentation": {"maxChars": 10}, **kwargs}
 
 
-def wait(manager, job_id, states=("completed", "failed", "paused", "storage_blocked"), timeout=8):
+def wait(manager, job_id, states=("completed", "failed", "paused", "storage_blocked"), timeout=45):
+    # These are state/IO recovery assertions, not speed benchmarks. Shared Windows
+    # runners can take longer to fsync rollback-journal transactions and audio.
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         result = manager.get(job_id)
         if result["status"] in states:
             return result
-        time.sleep(0.01)
+        time.sleep(0.05)
     raise AssertionError(manager.get(job_id))
 
 
